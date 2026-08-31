@@ -2,16 +2,12 @@ import { normalizePath, type App } from 'obsidian';
 import {
 	AmbientLight,
 	Box3,
-	BufferGeometry,
 	CanvasTexture,
 	Color,
 	CylinderGeometry,
 	DirectionalLight,
-	Float32BufferAttribute,
 	Group,
 	HemisphereLight,
-	LineBasicMaterial,
-	LineSegments,
 	LoadingManager,
 	Mesh,
 	MeshStandardMaterial,
@@ -22,6 +18,7 @@ import {
 	PlaneGeometry,
 	Raycaster,
 	Scene,
+	ShaderMaterial,
 	SphereGeometry,
 	Sprite,
 	SpriteMaterial,
@@ -59,14 +56,18 @@ const MIN_ELEVATION = 0.4;
 const MAX_ELEVATION = 1.15;
 const MIN_DISTANCE = 6;
 
-/** Matrix construct: open white void. Grid fades into this color. */
-const SKY_ZENITH = 0xf6f7f8;
-const GRID_MINOR = 0x2a3038;
-const GRID_MAJOR = 0x111418;
-const GRID_CELL = 2;
+/** Matrix construct: open white void. Lines fade by alpha, not by mixing to grey. */
+const SKY_ZENITH = 0xf7f8fa;
+const GRID_MINOR = 0x3a4048;
+const GRID_MAJOR = 0x2a3038;
+const GRID_CELL = 4;
 const GRID_MAJOR_EVERY = 5;
-/** Even Size Small keeps a long receding field, not a tight island. */
-const MIN_VISUAL_GRID = 280;
+const GRID_MINOR_ALPHA = 0.26;
+const GRID_MAJOR_ALPHA = 0.4;
+/** Visual field is independent of Size (Size is pan/play-area only). */
+const GRID_PLANE = 4000;
+const DEFAULT_DISTANCE = 40;
+const CAMERA_FOV = 40;
 
 export class FieldRenderer {
 	readonly canvas: HTMLCanvasElement;
@@ -81,7 +82,8 @@ export class FieldRenderer {
 	private readonly raycaster = new Raycaster();
 	private readonly pointer = new Vector2();
 	private readonly ground: Mesh;
-	private grid: LineSegments;
+	private readonly grid: Mesh;
+	private readonly gridUniforms: ConstructGridUniforms;
 	private readonly piecesRoot = new Group();
 	private readonly nodes = new Map<string, PieceNode>();
 	private readonly modelCache = new Map<string, Object3D>();
@@ -89,7 +91,7 @@ export class FieldRenderer {
 
 	private cameraMode: CameraMode = 'perspective';
 	private target = new Vector3(0, 0, 0);
-	private distance = 18;
+	private distance = DEFAULT_DISTANCE;
 	private azimuth = 0.55;
 	private elevation = 0.95;
 	private width = 1;
@@ -116,7 +118,7 @@ export class FieldRenderer {
 
 		this.scene.background = new Color(SKY_ZENITH);
 		this.scene.fog = null;
-		this.perspective = new PerspectiveCamera(36, 1, 0.1, 2000);
+		this.perspective = new PerspectiveCamera(CAMERA_FOV, 1, 0.1, 2000);
 		this.ortho = new OrthographicCamera(-10, 10, 10, -10, 0.1, 2000);
 
 		this.renderer = new WebGLRenderer({ antialias: true, alpha: false });
@@ -140,7 +142,9 @@ export class FieldRenderer {
 		this.ground.visible = false;
 		this.scene.add(this.ground);
 
-		this.grid = createFadingGridLines(visualGridSize(this.groundSize));
+		const construct = createConstructGrid();
+		this.grid = construct.mesh;
+		this.gridUniforms = construct.uniforms;
 		this.scene.add(this.grid);
 
 		this.scene.add(new HemisphereLight(0xf3f5f8, 0xb4b0a9, 0.85));
@@ -388,6 +392,15 @@ export class FieldRenderer {
 		this.updateCameraRange();
 		this.perspective.updateMatrixWorld();
 		this.ortho.updateMatrixWorld();
+		this.syncGridToView();
+	}
+
+	/** Keep the construct under the look target so pan never walks off a world-origin island. */
+	private syncGridToView(): void {
+		this.grid.position.set(this.target.x, 0.02, this.target.z);
+		const d = this.distance;
+		this.gridUniforms.uFadeNear.value = Math.max(56, d * 2.4);
+		this.gridUniforms.uFadeFar.value = Math.max(200, d * 7.5);
 	}
 
 	private setGroundSize(size: number): void {
@@ -398,19 +411,9 @@ export class FieldRenderer {
 		this.groundSize = size;
 		this.ground.geometry.dispose();
 		this.ground.geometry = new PlaneGeometry(size, size);
-		this.replaceGrid(visualGridSize(size));
 		this.distance = clamp(this.distance, MIN_DISTANCE, this.maxDistance());
 		this.clampTarget();
 		this.applyCamera();
-	}
-
-	private replaceGrid(size: number): void {
-		const wasVisible = this.grid.visible;
-		this.scene.remove(this.grid);
-		disposeObject3D(this.grid);
-		this.grid = createFadingGridLines(size);
-		this.grid.visible = wasVisible;
-		this.scene.add(this.grid);
 	}
 
 	private maxDistance(): number {
@@ -424,7 +427,7 @@ export class FieldRenderer {
 	}
 
 	private updateCameraRange(): void {
-		const far = Math.max(1200, this.groundSize * 2.5 + this.maxDistance() * 2);
+		const far = Math.max(2500, GRID_PLANE * 0.75 + this.maxDistance() * 2);
 		this.perspective.far = far;
 		this.ortho.far = far;
 		this.perspective.updateProjectionMatrix();
@@ -630,72 +633,97 @@ export class FieldRenderer {
 	}
 }
 
-function visualGridSize(boardSize: number): number {
-	return Math.max(boardSize, MIN_VISUAL_GRID);
+interface ConstructGridUniforms {
+	uCell: { value: number };
+	uMajorEvery: { value: number };
+	uMinorColor: { value: Color };
+	uMajorColor: { value: Color };
+	uMinorAlpha: { value: number };
+	uMajorAlpha: { value: number };
+	uFadeNear: { value: number };
+	uFadeFar: { value: number };
 }
 
-/** Stock LineSegments + vertex colors (same path as GridHelper). Fades to the white void. */
-function createFadingGridLines(size: number): LineSegments {
-	const half = size * 0.5;
-	const positions: number[] = [];
-	const colors: number[] = [];
-	const bg = new Color(SKY_ZENITH);
-	const minor = new Color(GRID_MINOR);
-	const major = new Color(GRID_MAJOR);
-	const steps = Math.max(8, Math.round(size / GRID_CELL));
-
-	const fadeAt = (x: number, z: number): number => {
-		const dist = Math.hypot(x, z);
-		const fadeNear = Math.max(32, half * 0.2);
-		const fadeFar = half * 0.96;
-		return 1 - smoothstep(fadeNear, fadeFar, dist);
+/**
+ * World-locked construct floor: 1px fwidth lines with alpha fade.
+ * Vertex-color LineSegments lerp toward the sky and pack into a grey disc —
+ * this path keeps white between the lines and recedes toward the horizon.
+ */
+function createConstructGrid(): { mesh: Mesh; uniforms: ConstructGridUniforms } {
+	const uniforms: ConstructGridUniforms = {
+		uCell: { value: GRID_CELL },
+		uMajorEvery: { value: GRID_MAJOR_EVERY },
+		uMinorColor: { value: new Color(GRID_MINOR) },
+		uMajorColor: { value: new Color(GRID_MAJOR) },
+		uMinorAlpha: { value: GRID_MINOR_ALPHA },
+		uMajorAlpha: { value: GRID_MAJOR_ALPHA },
+		uFadeNear: { value: 96 },
+		uFadeFar: { value: 300 },
 	};
-
-	const pushVertex = (x: number, z: number, lineColor: Color): void => {
-		const faded = lineColor.clone().lerp(bg, 1 - fadeAt(x, z));
-		positions.push(x, 0.02, z);
-		colors.push(faded.r, faded.g, faded.b);
-	};
-
-	const pushLine = (x0: number, z0: number, x1: number, z1: number, lineColor: Color): void => {
-		for (let s = 0; s < steps; s++) {
-			const t0 = s / steps;
-			const t1 = (s + 1) / steps;
-			pushVertex(x0 + (x1 - x0) * t0, z0 + (z1 - z0) * t0, lineColor);
-			pushVertex(x0 + (x1 - x0) * t1, z0 + (z1 - z0) * t1, lineColor);
-		}
-	};
-
-	const n = Math.round(size / GRID_CELL);
-	for (let i = 0; i <= n; i++) {
-		const k = -half + i * GRID_CELL;
-		const color = i % GRID_MAJOR_EVERY === 0 ? major : minor;
-		pushLine(-half, k, half, k, color);
-		pushLine(k, -half, k, half, color);
-	}
-
-	const geometry = new BufferGeometry();
-	geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
-	geometry.setAttribute('color', new Float32BufferAttribute(colors, 3));
-	const material = new LineBasicMaterial({
-		vertexColors: true,
-		toneMapped: false,
+	const material = new ShaderMaterial({
+		name: 'FieldsConstructGrid',
+		transparent: true,
+		depthWrite: false,
 		fog: false,
-	});
-	const lines = new LineSegments(geometry, material);
-	lines.frustumCulled = false;
-	lines.renderOrder = 1;
-	return lines;
-}
+		toneMapped: false,
+		uniforms: uniforms as unknown as ShaderMaterial['uniforms'],
+		vertexShader: `
+			varying vec2 vWorldXZ;
+			void main() {
+				vec4 world = modelMatrix * vec4(position, 1.0);
+				vWorldXZ = world.xz;
+				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+			}
+		`,
+		fragmentShader: `
+			varying vec2 vWorldXZ;
+			uniform float uCell;
+			uniform float uMajorEvery;
+			uniform vec3 uMinorColor;
+			uniform vec3 uMajorColor;
+			uniform float uMinorAlpha;
+			uniform float uMajorAlpha;
+			uniform float uFadeNear;
+			uniform float uFadeFar;
 
-function smoothstep(edge0: number, edge1: number, x: number): number {
-	const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
-	return t * t * (3 - 2 * t);
+			float lineMask(vec2 coord, float width) {
+				vec2 deriv = fwidth(coord);
+				vec2 grid = abs(fract(coord - 0.5) - 0.5) / max(deriv, vec2(1e-6));
+				return 1.0 - smoothstep(0.0, width, min(grid.x, grid.y));
+			}
+
+			void main() {
+				vec2 minorCoord = vWorldXZ / max(uCell, 0.001);
+				vec2 majorCoord = vWorldXZ / max(uCell * uMajorEvery, 0.001);
+				float minor = lineMask(minorCoord, 0.75);
+				float major = lineMask(majorCoord, 1.05);
+
+				// Drop a level when cells collapse to a few pixels — that smear is the grey blob.
+				float minorPix = max(fwidth(minorCoord.x), fwidth(minorCoord.y));
+				float majorPix = max(fwidth(majorCoord.x), fwidth(majorCoord.y));
+				minor *= 1.0 - smoothstep(0.16, 0.5, minorPix);
+				major *= 1.0 - smoothstep(0.16, 0.5, majorPix);
+
+				float dist = length(vWorldXZ - cameraPosition.xz);
+				float fade = 1.0 - smoothstep(uFadeNear, uFadeFar, dist);
+				float alpha = max(minor * uMinorAlpha, major * uMajorAlpha) * fade;
+				if (alpha < 0.012) discard;
+
+				vec3 color = mix(uMinorColor, uMajorColor, step(0.001, major));
+				gl_FragColor = vec4(color, alpha);
+			}
+		`,
+	});
+	const mesh = new Mesh(new PlaneGeometry(GRID_PLANE, GRID_PLANE), material);
+	mesh.rotation.x = -Math.PI / 2;
+	mesh.position.y = 0.02;
+	mesh.frustumCulled = false;
+	return { mesh, uniforms };
 }
 
 function disposeObject3D(object: Object3D): void {
 	object.traverse((node) => {
-		if (node instanceof Mesh || node instanceof LineSegments) {
+		if (node instanceof Mesh) {
 			node.geometry.dispose();
 			if (Array.isArray(node.material)) {
 				node.material.forEach((material) => material.dispose());

@@ -41,7 +41,7 @@ Standalone boards, similar to `.canvas` files.
 - Drag a note from the file explorer (or a `[[wiki link]]` / markdown link) onto the board to place it under the cursor. The drop uses the same `app.dragManager` + `text/plain` / `text/uri-list` path Canvas does, and stops the workspace from opening the file instead.
 - The **Components** side pane is a palette of piece types. Drag one onto the board to instance it. **Add** creates a new named component.
 - The JSON stores camera, optional `groundImage` vault path, `groundSize`, `components`, and `instances`.
-- The board is a Matrix-style white construct: dark grid lines on an open white field, fading out over a long distance. There is no solid ground plate. Use the toolbar size button (or `groundSize` in the file) to change how far you can pan.
+- The board is a Matrix-style white construct: thin dark grid lines on an open white field, receding toward the horizon. There is no solid ground plate. Use the toolbar size button (or `groundSize` in the file) to change how far you can pan — Size is the play area, not how large the visible grid is.
 - Instances can be **notes** (`kind: "note"`, `path`) or **custom pieces** (`kind: "piece"`, `label`).
 - Either kind may set `model` to a vault path.
 
@@ -53,7 +53,7 @@ Example:
 	"camera": {
 		"mode": "perspective",
 		"target": [0, 0],
-		"distance": 18,
+		"distance": 40,
 		"azimuth": 0.55,
 		"elevation": 0.95
 	},
@@ -109,4 +109,4 @@ npm run dev     # watch build
 npm run build   # typecheck + production bundle
 ```
 
-The board is an open white field with a dark grid that recedes over a long fade — no scene fog and no filled ground disc. Existing `.field` files without `groundSize` open at the large default.
+The board is an open white field with a thin dark grid that recedes over a long fade — no scene fog and no filled ground disc. Size only limits how far you can pan. Existing `.field` files without `groundSize` open at the large default.

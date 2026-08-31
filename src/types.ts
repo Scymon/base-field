@@ -37,7 +37,7 @@ export interface FieldFileData {
 	version: 1;
 	camera: FieldCameraState;
 	groundImage: string | null;
-	/** World-space width/depth of the board. Missing files default to large. */
+	/** Play-area width/depth (pan clamp). The visible construct grid is independent. */
 	groundSize: number;
 	/** Palette of piece types that can be dragged from the side pane. */
 	components: FieldComponent[];

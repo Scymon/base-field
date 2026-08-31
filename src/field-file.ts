@@ -9,7 +9,7 @@ export const DEFAULT_COMPONENT: FieldComponent = {
 export const DEFAULT_CAMERA: FieldCameraState = {
 	mode: 'perspective',
 	target: [0, 0],
-	distance: 18,
+	distance: 40,
 	azimuth: 0.55,
 	elevation: 0.95,
 };
