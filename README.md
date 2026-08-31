@@ -38,7 +38,8 @@ Both use the same Three.js board renderer.
 Standalone boards, similar to `.canvas` files.
 
 - Command palette: **Fields: Create new field**, or the map ribbon icon.
-- The JSON stores camera, optional `groundImage` vault path, and `instances`.
+- The JSON stores camera, optional `groundImage` vault path, `groundSize`, and `instances`.
+- The board is large by default so it recedes into a pale horizon. Use the toolbar size button (or `groundSize` in the file) to shrink it.
 - Instances can be **notes** (`kind: "note"`, `path`) or **custom pieces** (`kind: "piece"`, `label`).
 - Either kind may set `model` to a vault path.
 
@@ -55,6 +56,7 @@ Example:
 		"elevation": 0.95
 	},
 	"groundImage": "maps/overworld.png",
+	"groundSize": 480,
 	"instances": [
 		{ "id": "n1", "kind": "note", "path": "People/Ava.md", "x": -2, "y": 1 },
 		{ "id": "p1", "kind": "piece", "label": "Camp", "x": 3, "y": -1, "model": "models/tent.glb" }
@@ -74,6 +76,7 @@ View options:
 | --- | --- |
 | Ground image | Optional vault image used as the map |
 | Camera | Perspective or orthographic |
+| Field size | How far the board extends. Default is large; shrink it if you want a smaller plane |
 | X position / Y position | Note properties that store board coordinates (default `x` and `y`) |
 | Model file | Optional note property pointing at a glTF/GLB/OBJ file |
 
@@ -104,4 +107,4 @@ npm run dev     # watch build
 npm run build   # typecheck + production bundle
 ```
 
-v0 is intentionally small: a working board, two entry points, drag-to-persist, and glTF/OBJ loading. Lighting polish and Blender import pipelines can wait.
+The board uses a light sky, distance fog, and a grid that fades toward the horizon. Existing `.field` files without `groundSize` open at the large default.

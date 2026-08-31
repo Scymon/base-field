@@ -9,7 +9,14 @@ import {
 	TFile,
 	type WorkspaceLeaf,
 } from 'obsidian';
-import { FIELD_VIEW_TYPE, HOVER_LINK_SOURCE, POSITION_DECIMALS } from './constants';
+import {
+	FIELD_VIEW_TYPE,
+	GROUND_SIZE_LABELS,
+	HOVER_LINK_SOURCE,
+	POSITION_DECIMALS,
+	nearestGroundSizePreset,
+	nextGroundSize,
+} from './constants';
 import {
 	createDefaultField,
 	newId,
@@ -25,6 +32,7 @@ export class FieldFileView extends TextFileView implements HoverParent {
 	private hostEl: HTMLElement | null = null;
 	private toolbarEl: HTMLElement | null = null;
 	private cameraButton: HTMLButtonElement | null = null;
+	private sizeButton: HTMLButtonElement | null = null;
 	private renderer: FieldRenderer | null = null;
 	private field: FieldFileData = createDefaultField();
 	private rawFallback: string | null = null;
@@ -121,6 +129,7 @@ export class FieldFileView extends TextFileView implements HoverParent {
 		this.hostEl = null;
 		this.toolbarEl = null;
 		this.cameraButton = null;
+		this.sizeButton = null;
 		await super.onClose();
 	}
 
@@ -194,6 +203,17 @@ export class FieldFileView extends TextFileView implements HoverParent {
 			this.persist();
 		});
 
+		this.sizeButton = this.toolbarEl.createEl('button', {
+			cls: 'fields-toolbar-button',
+			text: sizeLabel(this.field.groundSize),
+		});
+		this.sizeButton.addEventListener('click', () => {
+			this.field.groundSize = nextGroundSize(this.field.groundSize);
+			this.sizeButton?.setText(sizeLabel(this.field.groundSize));
+			this.syncRenderer();
+			this.persist();
+		});
+
 		const addPieceBtn = this.toolbarEl.createEl('button', {
 			cls: 'fields-toolbar-button',
 			text: 'Add piece',
@@ -209,9 +229,11 @@ export class FieldFileView extends TextFileView implements HoverParent {
 
 	private syncRenderer(): void {
 		this.cameraButton?.setText(cameraLabel(this.field.camera.mode));
+		this.sizeButton?.setText(sizeLabel(this.field.groundSize));
 		this.renderer?.setState({
 			camera: this.field.camera,
 			groundImagePath: this.field.groundImage,
+			groundSize: this.field.groundSize,
 			pieces: this.field.instances.map(instanceToPiece),
 		});
 	}
@@ -313,6 +335,10 @@ function roundCoord(value: number): number {
 
 function cameraLabel(mode: CameraMode): string {
 	return mode === 'ortho' ? 'Orthographic' : 'Perspective';
+}
+
+function sizeLabel(size: number): string {
+	return `Size: ${GROUND_SIZE_LABELS[nearestGroundSizePreset(size)]}`;
 }
 
 export function isFieldFileView(view: unknown): view is FieldFileView {

@@ -12,10 +12,14 @@ import {
 } from 'obsidian';
 import {
 	BASES_VIEW_TYPE,
+	DEFAULT_GROUND_SIZE,
 	DEFAULT_X_PROPERTY,
 	DEFAULT_Y_PROPERTY,
+	GROUND_SIZE_PRESETS,
 	HOVER_LINK_SOURCE,
+	MAX_GROUND_SIZE,
 	POSITION_DECIMALS,
+	parseGroundSize,
 } from './constants';
 import { DEFAULT_CAMERA } from './field-file';
 import { FieldRenderer } from './renderer';
@@ -55,6 +59,7 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 		this.renderer?.setState({
 			camera: this.camera,
 			groundImagePath: readPath(this.config.get('groundImage')),
+			groundSize: parseGroundSize(this.config.get('groundSize')),
 			pieces: this.collectPieces(),
 		});
 	}
@@ -77,6 +82,16 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 					perspective: 'Perspective',
 					ortho: 'Orthographic',
 				},
+			},
+			{
+				type: 'slider',
+				key: 'groundSize',
+				displayName: 'Field size',
+				default: DEFAULT_GROUND_SIZE,
+				min: GROUND_SIZE_PRESETS.small,
+				max: MAX_GROUND_SIZE,
+				step: 16,
+				instant: true,
 			},
 			{
 				type: 'property',

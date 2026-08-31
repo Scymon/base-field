@@ -31,6 +31,8 @@ export interface FieldFileData {
 	version: 1;
 	camera: FieldCameraState;
 	groundImage: string | null;
+	/** World-space width/depth of the board. Missing files default to large. */
+	groundSize: number;
 	instances: FieldInstance[];
 }
 
@@ -46,5 +48,6 @@ export interface FieldPiece {
 export interface FieldSceneState {
 	camera: FieldCameraState;
 	groundImagePath?: string | null;
+	groundSize?: number;
 	pieces: FieldPiece[];
 }
