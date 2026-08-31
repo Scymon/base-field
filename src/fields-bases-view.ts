@@ -22,7 +22,7 @@ import {
 	POSITION_DECIMALS,
 	parseGroundSize,
 } from './constants';
-import { FIELD_NOTE_MIME, acceptBoardDrag } from './drops';
+import { acceptBoardDrag, parseBoardDrop, type NoteDrop } from './drops';
 import { DEFAULT_CAMERA } from './field-file';
 import { FieldRenderer } from './renderer';
 import type { CameraMode, FieldCameraState, FieldPiece } from './types';
@@ -37,7 +37,6 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 	private readonly pane: ComponentsPane;
 	private renderer: FieldRenderer | null = null;
 	private camera: FieldCameraState = { ...DEFAULT_CAMERA, target: [0, 0] };
-	private persistNoticeShown = false;
 
 	constructor(controller: QueryController, parentEl: HTMLElement) {
 		super(controller);
@@ -207,46 +206,104 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 	private onDrop = (event: DragEvent): void => {
 		acceptBoardDrag(event);
 		this.hostEl.removeClass('is-drop-target');
-		const raw = event.dataTransfer?.getData(FIELD_NOTE_MIME);
-		if (!raw) return;
-		let path = '';
-		try {
-			path = (JSON.parse(raw) as { path?: string }).path ?? '';
-		} catch {
-			return;
-		}
-		if (!path) return;
-		// Unclamped raycast — Size is pan/play-area, not the drop box.
+		if (!this.data) return;
+
 		const hit = this.renderer?.pickGround(event.clientX, event.clientY);
 		if (!hit) return;
+
+		const notes = parseBoardDrop(this.app, event).filter(
+			(drop): drop is NoteDrop => drop.kind === 'note',
+		);
+		if (notes.length === 0) return;
+
 		const roster = this.collectRoster();
-		const item = roster.find((entry) => entry.notePath === path);
-		if (!item) return;
-		void this.persistPiece({ ...item.piece, x: hit.x, y: hit.z }, hit.x, hit.z);
+		const byPath = new Map(roster.map((item) => [item.notePath, item]));
+		let placed = 0;
+		let skipped = 0;
+		for (const drop of notes) {
+			const item = byPath.get(drop.path);
+			if (!item) {
+				skipped += 1;
+				continue;
+			}
+			const x = hit.x + placed * 1.6;
+			const y = hit.z;
+			placed += 1;
+			void this.placeRosterNote(item, x, y);
+		}
+		if (placed === 0 && skipped > 0) {
+			new Notice('That note is not in this base.');
+		}
 	};
 
-	private async persistPiece(piece: FieldPiece, x: number, y: number): Promise<void> {
-		if (!piece.notePath) return;
+	private async placeRosterNote(
+		item: { piece: FieldPiece },
+		x: number,
+		y: number,
+	): Promise<void> {
+		const piece = { ...item.piece, x, y };
+		const wrote = await this.persistPiece(piece, x, y);
+		if (wrote) this.revealPlacedPiece(piece);
+	}
+
+	private revealPlacedPiece(piece: FieldPiece): void {
+		const roster = this.collectRoster();
+		this.renderer?.setState({
+			camera: this.camera,
+			groundImagePath: readPath(this.config.get('groundImage')),
+			groundSize: parseGroundSize(this.config.get('groundSize')),
+			pieces: [
+				...roster
+					.filter((item) => item.placed && item.notePath !== piece.notePath)
+					.map((item) => item.piece),
+				piece,
+			],
+		});
+		this.pane.setItems(
+			roster.map((item) => {
+				const placed = item.placed || item.notePath === piece.notePath;
+				return {
+					id: item.notePath,
+					label: item.label,
+					subtitle: placed ? 'On field' : 'Not placed',
+					placed,
+					drop: { kind: 'note' as const, path: item.notePath },
+				};
+			}),
+		);
+	}
+
+	private async persistPiece(piece: FieldPiece, x: number, y: number): Promise<boolean> {
+		if (!piece.notePath) return false;
 		const file = this.app.vault.getAbstractFileByPath(piece.notePath);
-		if (!(file instanceof TFile)) return;
+		if (!(file instanceof TFile)) {
+			new Notice('Fields could not find that note in the vault.');
+			return false;
+		}
 
 		const xId = this.config.getAsPropertyId('xProperty') ?? (DEFAULT_X_PROPERTY as BasesPropertyId);
 		const yId = this.config.getAsPropertyId('yProperty') ?? (DEFAULT_Y_PROPERTY as BasesPropertyId);
 		const xName = notePropertyName(xId);
 		const yName = notePropertyName(yId);
 		if (!xName || !yName) {
-			if (!this.persistNoticeShown) {
-				this.persistNoticeShown = true;
-				new Notice('Fields can only write X/Y to note properties.');
-			}
-			return;
+			new Notice(
+				'Fields can only write X/Y to note properties. Set X position and Y position to note properties (default x / y).',
+			);
+			return false;
 		}
 
-		this.renderer?.ignoreIncoming(piece.id, 800);
-		await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-			frontmatter[xName] = roundCoord(x);
-			frontmatter[yName] = roundCoord(y);
-		});
+		try {
+			this.renderer?.ignoreIncoming(piece.id, 800);
+			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+				frontmatter[xName] = roundCoord(x);
+				frontmatter[yName] = roundCoord(y);
+			});
+			return true;
+		} catch (error) {
+			console.warn('Fields: failed to write X/Y', piece.notePath, error);
+			new Notice('Fields could not write X/Y for that note.');
+			return false;
+		}
 	}
 
 	private openPiece(piece: FieldPiece): void {
