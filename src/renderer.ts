@@ -2,12 +2,16 @@ import { normalizePath, type App } from 'obsidian';
 import {
 	AmbientLight,
 	Box3,
+	BufferGeometry,
 	CanvasTexture,
 	Color,
 	CylinderGeometry,
 	DirectionalLight,
+	Float32BufferAttribute,
 	Group,
 	HemisphereLight,
+	LineBasicMaterial,
+	LineSegments,
 	LoadingManager,
 	Mesh,
 	MeshStandardMaterial,
@@ -18,7 +22,6 @@ import {
 	PlaneGeometry,
 	Raycaster,
 	Scene,
-	ShaderMaterial,
 	SphereGeometry,
 	Sprite,
 	SpriteMaterial,
@@ -56,9 +59,14 @@ const MIN_ELEVATION = 0.4;
 const MAX_ELEVATION = 1.15;
 const MIN_DISTANCE = 6;
 
-const SKY_ZENITH = 0xf3f4f6;
-const GROUND_COLOR = 0xc4c6cb;
-const GRID_COLOR = 0x2c323a;
+/** Matrix construct: open white void. Grid fades into this color. */
+const SKY_ZENITH = 0xf6f7f8;
+const GRID_MINOR = 0x2a3038;
+const GRID_MAJOR = 0x111418;
+const GRID_CELL = 2;
+const GRID_MAJOR_EVERY = 5;
+/** Even Size Small keeps a long receding field, not a tight island. */
+const MIN_VISUAL_GRID = 280;
 
 export class FieldRenderer {
 	readonly canvas: HTMLCanvasElement;
@@ -73,14 +81,7 @@ export class FieldRenderer {
 	private readonly raycaster = new Raycaster();
 	private readonly pointer = new Vector2();
 	private readonly ground: Mesh;
-	private readonly grid: Mesh;
-	private readonly gridUniforms: {
-		uColor: { value: Color };
-		uHalf: { value: number };
-		uCell: { value: number };
-	};
-	private readonly rimAlpha: CanvasTexture;
-	private readonly skyBackground: CanvasTexture;
+	private grid: LineSegments;
 	private readonly piecesRoot = new Group();
 	private readonly nodes = new Map<string, PieceNode>();
 	private readonly modelCache = new Map<string, Object3D>();
@@ -113,8 +114,7 @@ export class FieldRenderer {
 		this.app = app;
 		this.callbacks = callbacks;
 
-		this.skyBackground = createSkyBackground();
-		this.scene.background = this.skyBackground;
+		this.scene.background = new Color(SKY_ZENITH);
 		this.scene.fog = null;
 		this.perspective = new PerspectiveCamera(36, 1, 0.1, 2000);
 		this.ortho = new OrthographicCamera(-10, 10, 10, -10, 0.1, 2000);
@@ -128,29 +128,24 @@ export class FieldRenderer {
 		this.canvas.tabIndex = 0;
 		host.appendChild(this.canvas);
 
-		this.rimAlpha = createRimAlphaMap();
 		const groundMat = new MeshStandardMaterial({
-			color: GROUND_COLOR,
+			color: 0xffffff,
 			roughness: 0.96,
 			metalness: 0,
 			fog: false,
-			transparent: true,
-			alphaMap: this.rimAlpha,
-			depthWrite: true,
 		});
 		this.ground = new Mesh(new PlaneGeometry(this.groundSize, this.groundSize), groundMat);
 		this.ground.rotation.x = -Math.PI / 2;
 		this.ground.receiveShadow = false;
+		this.ground.visible = false;
 		this.scene.add(this.ground);
 
-		const grid = createFadingGrid(this.groundSize);
-		this.grid = grid.mesh;
-		this.gridUniforms = grid.uniforms;
+		this.grid = createFadingGridLines(visualGridSize(this.groundSize));
 		this.scene.add(this.grid);
 
-		this.scene.add(new HemisphereLight(0xf3f5f8, 0xb4b0a9, 0.8));
-		this.scene.add(new AmbientLight(0xffffff, 0.32));
-		const sun = new DirectionalLight(0xfff3e4, 0.75);
+		this.scene.add(new HemisphereLight(0xf3f5f8, 0xb4b0a9, 0.85));
+		this.scene.add(new AmbientLight(0xffffff, 0.4));
+		const sun = new DirectionalLight(0xfff3e4, 0.7);
 		sun.position.set(18, 34, 14);
 		this.scene.add(sun);
 		this.scene.add(this.piecesRoot);
@@ -159,7 +154,16 @@ export class FieldRenderer {
 		this.bindEvents();
 		this.resize();
 		this.applyCamera();
+		requestAnimationFrame(() => {
+			if (!this.disposed) this.resize();
+		});
 		this.loop();
+	}
+
+	/** Raycast the infinite board plane from a client point (drops, pan, pawn drag). */
+	pickGround(clientX: number, clientY: number, clampToBoard = true): Vector3 | null {
+		const fake = { clientX, clientY } as PointerEvent;
+		return this.intersectGround(fake, clampToBoard);
 	}
 
 	setState(state: FieldSceneState): void {
@@ -189,8 +193,8 @@ export class FieldRenderer {
 
 	resize(): void {
 		const rect = this.host.getBoundingClientRect();
-		this.width = Math.max(1, Math.floor(rect.width));
-		this.height = Math.max(1, Math.floor(rect.height));
+		this.width = Math.max(1, Math.floor(this.host.clientWidth || rect.width));
+		this.height = Math.max(1, Math.floor(this.host.clientHeight || rect.height));
 		this.renderer.setSize(this.width, this.height, false);
 		this.applyCamera();
 	}
@@ -210,8 +214,6 @@ export class FieldRenderer {
 		this.nodes.forEach((node) => this.disposeNode(node));
 		this.nodes.clear();
 		this.groundTexture?.dispose();
-		this.rimAlpha.dispose();
-		this.skyBackground.dispose();
 		(this.ground.material as MeshStandardMaterial).dispose();
 		this.ground.geometry.dispose();
 		disposeObject3D(this.grid);
@@ -376,7 +378,7 @@ export class FieldRenderer {
 		this.perspective.aspect = aspect;
 		this.perspective.updateProjectionMatrix();
 
-		const halfH = d * 0.26;
+		const halfH = Math.max(3.2, d * 0.26);
 		const halfW = halfH * aspect;
 		this.ortho.left = -halfW;
 		this.ortho.right = halfW;
@@ -396,12 +398,19 @@ export class FieldRenderer {
 		this.groundSize = size;
 		this.ground.geometry.dispose();
 		this.ground.geometry = new PlaneGeometry(size, size);
-		this.grid.geometry.dispose();
-		this.grid.geometry = new PlaneGeometry(size, size);
-		this.gridUniforms.uHalf.value = size * 0.5;
+		this.replaceGrid(visualGridSize(size));
 		this.distance = clamp(this.distance, MIN_DISTANCE, this.maxDistance());
 		this.clampTarget();
 		this.applyCamera();
+	}
+
+	private replaceGrid(size: number): void {
+		const wasVisible = this.grid.visible;
+		this.scene.remove(this.grid);
+		disposeObject3D(this.grid);
+		this.grid = createFadingGridLines(size);
+		this.grid.visible = wasVisible;
+		this.scene.add(this.grid);
 	}
 
 	private maxDistance(): number {
@@ -517,8 +526,9 @@ export class FieldRenderer {
 		this.groundTexture = null;
 		if (!path) {
 			material.map = null;
-			material.color.set(GROUND_COLOR);
+			material.color.set(0xffffff);
 			material.needsUpdate = true;
+			this.ground.visible = false;
 			this.grid.visible = true;
 			return;
 		}
@@ -535,6 +545,7 @@ export class FieldRenderer {
 			material.map = texture;
 			material.color.set(0xffffff);
 			material.needsUpdate = true;
+			this.ground.visible = true;
 			this.grid.visible = false;
 		} catch (error) {
 			console.warn('Fields: failed to load ground image', path, error);
@@ -619,100 +630,72 @@ export class FieldRenderer {
 	}
 }
 
-function createSkyBackground(): CanvasTexture {
-	const canvas = document.createElement('canvas');
-	canvas.width = 2;
-	canvas.height = 256;
-	const ctx = canvas.getContext('2d');
-	if (ctx) {
-		const gradient = ctx.createLinearGradient(0, 0, 0, 256);
-		gradient.addColorStop(0, '#f3f4f6');
-		gradient.addColorStop(1, '#e2e4e8');
-		ctx.fillStyle = gradient;
-		ctx.fillRect(0, 0, 2, 256);
-	}
-	const texture = new CanvasTexture(canvas);
-	texture.colorSpace = SRGBColorSpace;
-	return texture;
+function visualGridSize(boardSize: number): number {
+	return Math.max(boardSize, MIN_VISUAL_GRID);
 }
 
-function createRimAlphaMap(): CanvasTexture {
-	const canvas = document.createElement('canvas');
-	canvas.width = 256;
-	canvas.height = 256;
-	const ctx = canvas.getContext('2d');
-	if (ctx) {
-		const gradient = ctx.createRadialGradient(128, 128, 108, 128, 128, 128);
-		gradient.addColorStop(0, '#ffffff');
-		gradient.addColorStop(1, '#000000');
-		ctx.fillStyle = gradient;
-		ctx.fillRect(0, 0, 256, 256);
-	}
-	const texture = new CanvasTexture(canvas);
-	return texture;
-}
+/** Stock LineSegments + vertex colors (same path as GridHelper). Fades to the white void. */
+function createFadingGridLines(size: number): LineSegments {
+	const half = size * 0.5;
+	const positions: number[] = [];
+	const colors: number[] = [];
+	const bg = new Color(SKY_ZENITH);
+	const minor = new Color(GRID_MINOR);
+	const major = new Color(GRID_MAJOR);
+	const steps = Math.max(8, Math.round(size / GRID_CELL));
 
-function createFadingGrid(size: number): {
-	mesh: Mesh;
-	uniforms: {
-		uColor: { value: Color };
-		uHalf: { value: number };
-		uCell: { value: number };
+	const fadeAt = (x: number, z: number): number => {
+		const dist = Math.hypot(x, z);
+		const fadeNear = Math.max(32, half * 0.2);
+		const fadeFar = half * 0.96;
+		return 1 - smoothstep(fadeNear, fadeFar, dist);
 	};
-} {
-	const uniforms = {
-		uColor: { value: new Color(GRID_COLOR) },
-		uHalf: { value: size * 0.5 },
-		uCell: { value: 2 },
+
+	const pushVertex = (x: number, z: number, lineColor: Color): void => {
+		const faded = lineColor.clone().lerp(bg, 1 - fadeAt(x, z));
+		positions.push(x, 0.02, z);
+		colors.push(faded.r, faded.g, faded.b);
 	};
-	const material = new ShaderMaterial({
-		name: 'FieldsGrid',
-		transparent: true,
-		depthWrite: false,
-		fog: false,
+
+	const pushLine = (x0: number, z0: number, x1: number, z1: number, lineColor: Color): void => {
+		for (let s = 0; s < steps; s++) {
+			const t0 = s / steps;
+			const t1 = (s + 1) / steps;
+			pushVertex(x0 + (x1 - x0) * t0, z0 + (z1 - z0) * t0, lineColor);
+			pushVertex(x0 + (x1 - x0) * t1, z0 + (z1 - z0) * t1, lineColor);
+		}
+	};
+
+	const n = Math.round(size / GRID_CELL);
+	for (let i = 0; i <= n; i++) {
+		const k = -half + i * GRID_CELL;
+		const color = i % GRID_MAJOR_EVERY === 0 ? major : minor;
+		pushLine(-half, k, half, k, color);
+		pushLine(k, -half, k, half, color);
+	}
+
+	const geometry = new BufferGeometry();
+	geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
+	geometry.setAttribute('color', new Float32BufferAttribute(colors, 3));
+	const material = new LineBasicMaterial({
+		vertexColors: true,
 		toneMapped: false,
-		uniforms,
-		vertexShader: `
-			varying vec2 vWorldXZ;
-			void main() {
-				vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;
-				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-			}
-		`,
-		fragmentShader: `
-			varying vec2 vWorldXZ;
-			uniform vec3 uColor;
-			uniform float uHalf;
-			uniform float uCell;
-			void main() {
-				vec2 coord = vWorldXZ / uCell;
-				vec2 deriv = fwidth(coord);
-				vec2 line = abs(fract(coord - 0.5) - 0.5) / max(deriv, vec2(1e-6));
-				float minor = 1.0 - smoothstep(0.0, 1.25, min(line.x, line.y));
-
-				vec2 majorCoord = vWorldXZ / (uCell * 5.0);
-				vec2 majorDeriv = fwidth(majorCoord);
-				vec2 majorLine = abs(fract(majorCoord - 0.5) - 0.5) / max(majorDeriv, vec2(1e-6));
-				float major = 1.0 - smoothstep(0.0, 1.4, min(majorLine.x, majorLine.y));
-
-				float rim = length(vWorldXZ) / max(uHalf, 0.001);
-				float fade = 1.0 - smoothstep(0.58, 0.96, rim);
-				float alpha = max(minor * 0.78, major * 0.95) * fade;
-				if (alpha < 0.02) discard;
-				gl_FragColor = vec4(uColor, alpha);
-			}
-		`,
+		fog: false,
 	});
-	const mesh = new Mesh(new PlaneGeometry(size, size), material);
-	mesh.rotation.x = -Math.PI / 2;
-	mesh.position.y = 0.02;
-	mesh.renderOrder = 1;
-	return { mesh, uniforms };
+	const lines = new LineSegments(geometry, material);
+	lines.frustumCulled = false;
+	lines.renderOrder = 1;
+	return lines;
+}
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+	const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
+	return t * t * (3 - 2 * t);
 }
 
 function disposeObject3D(object: Object3D): void {
 	object.traverse((node) => {
-		if (node instanceof Mesh) {
+		if (node instanceof Mesh || node instanceof LineSegments) {
 			node.geometry.dispose();
 			if (Array.isArray(node.material)) {
 				node.material.forEach((material) => material.dispose());
@@ -834,7 +817,7 @@ function colorFor(seed: string): number {
 		hash = (hash * 31 + seed.charCodeAt(i)) | 0;
 	}
 	const hue = Math.abs(hash) % 360;
-	return new Color().setHSL(hue / 360, 0.54, 0.4).getHex();
+	return new Color().setHSL(hue / 360, 0.5, 0.22).getHex();
 }
 
 function ellipsize(text: string, max: number): string {

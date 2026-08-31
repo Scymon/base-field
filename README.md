@@ -38,8 +38,10 @@ Both use the same Three.js board renderer.
 Standalone boards, similar to `.canvas` files.
 
 - Command palette: **Fields: Create new field**, or the map ribbon icon.
-- The JSON stores camera, optional `groundImage` vault path, `groundSize`, and `instances`.
-- The board is large by default. Nearby you see a clear grid; it fades to transparent toward the rim. Use the toolbar size button (or `groundSize` in the file) to shrink it.
+- Drag a note from the file explorer (or a `[[wiki link]]` / markdown link) onto the board to place it under the cursor. The drop uses the same `app.dragManager` + `text/plain` / `text/uri-list` path Canvas does, and stops the workspace from opening the file instead.
+- The **Components** side pane is a palette of piece types. Drag one onto the board to instance it. **Add** creates a new named component.
+- The JSON stores camera, optional `groundImage` vault path, `groundSize`, `components`, and `instances`.
+- The board is a Matrix-style white construct: dark grid lines on an open white field, fading out over a long distance. There is no solid ground plate. Use the toolbar size button (or `groundSize` in the file) to change how far you can pan.
 - Instances can be **notes** (`kind: "note"`, `path`) or **custom pieces** (`kind: "piece"`, `label`).
 - Either kind may set `model` to a vault path.
 
@@ -68,7 +70,7 @@ Example:
 
 If Bases is enabled, **Fields** appears in the same layout menu as Table, Cards, and List.
 
-The base query is the roster: each matching note is a pawn. Dragging a pawn writes `x` / `y` to that note's properties.
+The base query is the roster. Matching notes appear in the **Base filter** side pane; drag one onto the board to place it (writes `x` / `y`). Notes that already have coordinates stay on the field. File-explorer drops are not used in this mode.
 
 View options:
 
@@ -86,7 +88,7 @@ Notes without X/Y yet are placed on a grid until you drag them.
 
 - **Drag a pawn** to move it. Position is saved (`.field` JSON, or note properties in a Base).
 - **Click a note-pawn** to open that note. Hover preview uses the Page Preview plugin.
-- **Drag empty ground** to pan. **Right-drag** (or Alt-drag) to orbit. **Scroll** to zoom.
+- **Drag empty ground** to pan (the grabbed point stays under the cursor). **Right-drag** (or Alt-drag) to orbit. **Scroll** to zoom.
 - The camera stays locked to a board angle. It is not a free-fly camera.
 
 ## Models
@@ -107,4 +109,4 @@ npm run dev     # watch build
 npm run build   # typecheck + production bundle
 ```
 
-The board uses a pale background and a grid that fades to transparent at the rim — no scene fog. Existing `.field` files without `groundSize` open at the large default.
+The board is an open white field with a dark grid that recedes over a long fade — no scene fog and no filled ground disc. Existing `.field` files without `groundSize` open at the large default.

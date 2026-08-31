@@ -1,5 +1,10 @@
 import { DEFAULT_GROUND_SIZE, parseGroundSize } from './constants';
-import type { FieldCameraState, FieldFileData, FieldInstance } from './types';
+import type { FieldCameraState, FieldComponent, FieldFileData, FieldInstance } from './types';
+
+export const DEFAULT_COMPONENT: FieldComponent = {
+	id: 'pawn',
+	label: 'Pawn',
+};
 
 export const DEFAULT_CAMERA: FieldCameraState = {
 	mode: 'perspective',
@@ -15,6 +20,7 @@ export function createDefaultField(): FieldFileData {
 		camera: { ...DEFAULT_CAMERA, target: [0, 0] },
 		groundImage: null,
 		groundSize: DEFAULT_GROUND_SIZE,
+		components: [{ ...DEFAULT_COMPONENT }],
 		instances: [
 			{
 				id: newId(),
@@ -68,6 +74,12 @@ function normalizeField(input: unknown): FieldFileData {
 			? obj['groundImage']
 			: null;
 
+	const componentsRaw = Array.isArray(obj['components']) ? obj['components'] : [];
+	const components = componentsRaw
+		.map((item) => normalizeComponent(item))
+		.filter((item): item is FieldComponent => item !== null);
+	if (components.length === 0) components.push({ ...DEFAULT_COMPONENT });
+
 	return {
 		version: 1,
 		camera,
@@ -75,10 +87,23 @@ function normalizeField(input: unknown): FieldFileData {
 		groundSize: parseGroundSize(
 			obj['groundSize'] === undefined ? DEFAULT_GROUND_SIZE : obj['groundSize'],
 		),
+		components,
 		instances: instancesRaw
 			.map((item) => normalizeInstance(item))
 			.filter((item): item is FieldInstance => item !== null),
 	};
+}
+
+function normalizeComponent(input: unknown): FieldComponent | null {
+	if (!isRecord(input)) return null;
+	const label =
+		typeof input['label'] === 'string' && input['label'].trim()
+			? input['label'].trim()
+			: '';
+	if (!label) return null;
+	const id = typeof input['id'] === 'string' && input['id'] ? input['id'] : newId();
+	const model = typeof input['model'] === 'string' ? input['model'] : null;
+	return { id, label, model };
 }
 
 function normalizeInstance(input: unknown): FieldInstance | null {
