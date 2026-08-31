@@ -164,10 +164,14 @@ export class FieldRenderer {
 		this.loop();
 	}
 
-	/** Raycast the infinite board plane from a client point (drops, pan, pawn drag). */
-	pickGround(clientX: number, clientY: number, clampToBoard = true): Vector3 | null {
+	/**
+	 * Raycast the infinite ground plane from a client point (explorer / pane drops).
+	 * Never clamps to Size — a drop is "put it here," under the cursor.
+	 */
+	pickGround(clientX: number, clientY: number): Vector3 | null {
+		this.applyCamera();
 		const fake = { clientX, clientY } as PointerEvent;
-		return this.intersectGround(fake, clampToBoard);
+		return this.intersectGround(fake, false);
 	}
 
 	setState(state: FieldSceneState): void {
@@ -616,6 +620,7 @@ export class FieldRenderer {
 
 	private intersectGround(event: PointerEvent, clampToBoard = true): Vector3 | null {
 		this.setPointer(event);
+		this.activeCamera.updateMatrixWorld();
 		this.raycaster.setFromCamera(this.pointer, this.activeCamera);
 		const point = new Vector3();
 		if (this.raycaster.ray.intersectPlane(GROUND_PLANE, point)) {
@@ -629,10 +634,13 @@ export class FieldRenderer {
 		return null;
 	}
 
+	/** NDC from the WebGL canvas, not the host (which can include overlays). */
 	private setPointer(event: PointerEvent): void {
 		const rect = this.canvas.getBoundingClientRect();
-		this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-		this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+		const w = Math.max(1, rect.width);
+		const h = Math.max(1, rect.height);
+		this.pointer.x = ((event.clientX - rect.left) / w) * 2 - 1;
+		this.pointer.y = -((event.clientY - rect.top) / h) * 2 + 1;
 	}
 }
 

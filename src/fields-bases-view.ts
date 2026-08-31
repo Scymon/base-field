@@ -216,6 +216,7 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 			return;
 		}
 		if (!path) return;
+		// Unclamped raycast — Size is pan/play-area, not the drop box.
 		const hit = this.renderer?.pickGround(event.clientX, event.clientY);
 		if (!hit) return;
 		const roster = this.collectRoster();
