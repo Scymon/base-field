@@ -645,8 +645,10 @@ function createFadingGridLines(size: number): LineSegments {
 	const steps = Math.max(8, Math.round(size / GRID_CELL));
 
 	const fadeAt = (x: number, z: number): number => {
-		const rim = Math.hypot(x, z) / Math.max(half, 0.001);
-		return 1 - smoothstep(0.06, 0.94, rim);
+		const dist = Math.hypot(x, z);
+		const fadeNear = Math.max(32, half * 0.2);
+		const fadeFar = half * 0.96;
+		return 1 - smoothstep(fadeNear, fadeFar, dist);
 	};
 
 	const pushVertex = (x: number, z: number, lineColor: Color): void => {
