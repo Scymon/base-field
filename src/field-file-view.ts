@@ -9,6 +9,7 @@ import {
 	TFile,
 	type WorkspaceLeaf,
 } from 'obsidian';
+import { ComponentsPane } from './components-pane';
 import {
 	FIELD_VIEW_TYPE,
 	GROUND_SIZE_LABELS,
@@ -17,6 +18,7 @@ import {
 	nearestGroundSizePreset,
 	nextGroundSize,
 } from './constants';
+import { parseBoardDrop } from './drops';
 import {
 	createDefaultField,
 	newId,
@@ -24,7 +26,9 @@ import {
 	serializeField,
 } from './field-file';
 import { FieldRenderer } from './renderer';
+import { TextPromptModal } from './text-prompt-modal';
 import type { CameraMode, FieldFileData, FieldInstance, FieldPiece } from './types';
+import { resolveVaultFile } from './vault';
 
 export class FieldFileView extends TextFileView implements HoverParent {
 	hoverPopover: HoverPopover | null = null;
@@ -33,6 +37,7 @@ export class FieldFileView extends TextFileView implements HoverParent {
 	private toolbarEl: HTMLElement | null = null;
 	private cameraButton: HTMLButtonElement | null = null;
 	private sizeButton: HTMLButtonElement | null = null;
+	private pane: ComponentsPane | null = null;
 	private renderer: FieldRenderer | null = null;
 	private field: FieldFileData = createDefaultField();
 	private rawFallback: string | null = null;
@@ -106,7 +111,7 @@ export class FieldFileView extends TextFileView implements HoverParent {
 		this.buildToolbar(this.hostEl);
 		this.hostEl.createDiv({
 			cls: 'fields-hint',
-			text: 'Drag a pawn to move · Drag the ground to pan · Right-drag to orbit · Scroll to zoom',
+			text: 'Drop a note from the explorer · Drag a pawn to move · Drag the ground to pan',
 		});
 		this.renderer = new FieldRenderer(this.hostEl, this.app, {
 			onPieceClick: (piece) => this.openPiece(piece),
@@ -120,12 +125,23 @@ export class FieldFileView extends TextFileView implements HoverParent {
 				this.persist();
 			},
 		});
+		this.pane = new ComponentsPane(this.contentEl, {
+			title: 'Components',
+			hint: 'Drag onto the board',
+			addLabel: 'Add',
+			onAdd: () => this.promptAddComponent(),
+		});
+		this.registerDomEvent(this.hostEl, 'dragover', this.onDragOver);
+		this.registerDomEvent(this.hostEl, 'dragleave', this.onDragLeave);
+		this.registerDomEvent(this.hostEl, 'drop', this.onDrop);
 		this.syncRenderer();
 	}
 
 	protected async onClose(): Promise<void> {
 		this.renderer?.dispose();
 		this.renderer = null;
+		this.pane?.destroy();
+		this.pane = null;
 		this.hostEl = null;
 		this.toolbarEl = null;
 		this.cameraButton = null;
@@ -151,24 +167,33 @@ export class FieldFileView extends TextFileView implements HoverParent {
 		});
 	}
 
-	addPiece(label = 'Piece'): void {
+	addPiece(label = 'Piece', x?: number, y?: number, model?: string | null): void {
+		const slot = nextOpenSlot(this.field.instances);
 		const instance: FieldInstance = {
 			id: newId(),
 			kind: 'piece',
 			label,
-			x: nextOpenSlot(this.field.instances).x,
-			y: nextOpenSlot(this.field.instances).y,
+			x: x ?? slot.x,
+			y: y ?? slot.y,
+			model: model ?? null,
 		};
 		this.field.instances.push(instance);
 		this.syncRenderer();
 		this.persist();
 	}
 
-	addNote(file: TFile): void {
+	addNote(file: TFile, x?: number, y?: number): void {
 		const existing = this.field.instances.find(
 			(instance) => instance.kind === 'note' && instance.path === file.path,
 		);
 		if (existing) {
+			if (x !== undefined && y !== undefined) {
+				existing.x = roundCoord(x);
+				existing.y = roundCoord(y);
+				this.syncRenderer();
+				this.persist();
+				return;
+			}
 			new Notice('That note is already on this field.');
 			return;
 		}
@@ -177,8 +202,8 @@ export class FieldFileView extends TextFileView implements HoverParent {
 			id: newId(),
 			kind: 'note',
 			path: file.path,
-			x: slot.x,
-			y: slot.y,
+			x: x ?? slot.x,
+			y: y ?? slot.y,
 		});
 		this.syncRenderer();
 		this.persist();
@@ -230,6 +255,14 @@ export class FieldFileView extends TextFileView implements HoverParent {
 	private syncRenderer(): void {
 		this.cameraButton?.setText(cameraLabel(this.field.camera.mode));
 		this.sizeButton?.setText(sizeLabel(this.field.groundSize));
+		this.pane?.setItems(
+			this.field.components.map((component) => ({
+				id: component.id,
+				label: component.label,
+				subtitle: component.model ? 'Custom model' : 'Default pawn',
+				drop: { kind: 'piece', label: component.label, model: component.model ?? null },
+			})),
+		);
 		this.renderer?.setState({
 			camera: this.field.camera,
 			groundImagePath: this.field.groundImage,
@@ -237,6 +270,46 @@ export class FieldFileView extends TextFileView implements HoverParent {
 			pieces: this.field.instances.map(instanceToPiece),
 		});
 	}
+
+	private promptAddComponent(): void {
+		new TextPromptModal(this.app, 'Add component', 'Piece name', (label) => {
+			this.field.components.push({ id: newId(), label, model: null });
+			this.syncRenderer();
+			this.persist();
+		}).open();
+	}
+
+	private onDragOver = (event: DragEvent): void => {
+		event.preventDefault();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+		this.hostEl?.addClass('is-drop-target');
+	};
+
+	private onDragLeave = (event: DragEvent): void => {
+		if (event.relatedTarget instanceof Node && this.hostEl?.contains(event.relatedTarget)) {
+			return;
+		}
+		this.hostEl?.removeClass('is-drop-target');
+	};
+
+	private onDrop = (event: DragEvent): void => {
+		event.preventDefault();
+		this.hostEl?.removeClass('is-drop-target');
+		const hit = this.renderer?.pickGround(event.clientX, event.clientY);
+		if (!hit) return;
+		const drops = parseBoardDrop(this.app, event);
+		if (drops.length === 0) return;
+		drops.forEach((drop, index) => {
+			const x = hit.x + index * 1.6;
+			const y = hit.z;
+			if (drop.kind === 'piece') {
+				this.addPiece(drop.label, x, y, drop.model);
+				return;
+			}
+			const file = resolveVaultFile(this.app, drop.path);
+			if (file) this.addNote(file, x, y);
+		});
+	};
 
 	private movePiece(id: string, x: number, y: number): void {
 		const instance = this.field.instances.find((item) => item.id === id);

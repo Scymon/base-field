@@ -9,6 +9,12 @@ export interface FieldCameraState {
 	elevation: number;
 }
 
+export interface FieldComponent {
+	id: string;
+	label: string;
+	model?: string | null;
+}
+
 export type FieldInstance =
 	| {
 			id: string;
@@ -33,6 +39,8 @@ export interface FieldFileData {
 	groundImage: string | null;
 	/** World-space width/depth of the board. Missing files default to large. */
 	groundSize: number;
+	/** Palette of piece types that can be dragged from the side pane. */
+	components: FieldComponent[];
 	instances: FieldInstance[];
 }
 

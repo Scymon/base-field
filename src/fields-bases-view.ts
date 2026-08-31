@@ -10,6 +10,7 @@ import {
 	type BasesPropertyId,
 	type QueryController,
 } from 'obsidian';
+import { ComponentsPane } from './components-pane';
 import {
 	BASES_VIEW_TYPE,
 	DEFAULT_GROUND_SIZE,
@@ -21,6 +22,7 @@ import {
 	POSITION_DECIMALS,
 	parseGroundSize,
 } from './constants';
+import { FIELD_NOTE_MIME } from './drops';
 import { DEFAULT_CAMERA } from './field-file';
 import { FieldRenderer } from './renderer';
 import type { CameraMode, FieldCameraState, FieldPiece } from './types';
@@ -32,22 +34,32 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 	hoverPopover: HoverPopover | null = null;
 
 	private readonly hostEl: HTMLElement;
+	private readonly pane: ComponentsPane;
 	private renderer: FieldRenderer | null = null;
 	private camera: FieldCameraState = { ...DEFAULT_CAMERA, target: [0, 0] };
 	private persistNoticeShown = false;
 
 	constructor(controller: QueryController, parentEl: HTMLElement) {
 		super(controller);
-		this.hostEl = parentEl.createDiv({ cls: 'fields-view fields-bases-view' });
+		const shell = parentEl.createDiv({ cls: 'fields-bases-shell' });
+		this.hostEl = shell.createDiv({ cls: 'fields-view fields-bases-view' });
+		this.pane = new ComponentsPane(shell, {
+			title: 'Base filter',
+			hint: 'Drag a note onto the board',
+		});
 	}
 
 	onload(): void {
 		this.ensureRenderer();
+		this.registerDomEvent(this.hostEl, 'dragover', this.onDragOver);
+		this.registerDomEvent(this.hostEl, 'dragleave', this.onDragLeave);
+		this.registerDomEvent(this.hostEl, 'drop', this.onDrop);
 	}
 
 	onunload(): void {
 		this.renderer?.dispose();
 		this.renderer = null;
+		this.pane.destroy();
 	}
 
 	onDataUpdated(): void {
@@ -56,11 +68,21 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 		const mode = readCameraMode(this.config.get('cameraMode'));
 		this.camera = { ...this.camera, mode };
 		this.renderer?.setCameraMode(mode);
+		const roster = this.collectRoster();
+		this.pane.setItems(
+			roster.map((item) => ({
+				id: item.notePath,
+				label: item.label,
+				subtitle: item.placed ? 'On field' : 'Not placed',
+				placed: item.placed,
+				drop: { kind: 'note', path: item.notePath },
+			})),
+		);
 		this.renderer?.setState({
 			camera: this.camera,
 			groundImagePath: readPath(this.config.get('groundImage')),
 			groundSize: parseGroundSize(this.config.get('groundSize')),
-			pieces: this.collectPieces(),
+			pieces: roster.filter((item) => item.placed).map((item) => item.piece),
 		});
 	}
 
@@ -130,38 +152,78 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 		});
 	}
 
-	private collectPieces(): FieldPiece[] {
+	private collectRoster(): Array<{
+		notePath: string;
+		label: string;
+		placed: boolean;
+		piece: FieldPiece;
+	}> {
 		const xId = this.config.getAsPropertyId('xProperty') ?? (DEFAULT_X_PROPERTY as BasesPropertyId);
 		const yId = this.config.getAsPropertyId('yProperty') ?? (DEFAULT_Y_PROPERTY as BasesPropertyId);
 		const modelId = this.config.getAsPropertyId('modelProperty');
-		const pieces: FieldPiece[] = [];
-		let unsetIndex = 0;
+		const roster: Array<{
+			notePath: string;
+			label: string;
+			placed: boolean;
+			piece: FieldPiece;
+		}> = [];
 
 		for (const entry of this.data.data) {
 			const x = valueToNumber(entry.getValue(xId));
 			const y = valueToNumber(entry.getValue(yId));
-			let boardX = x;
-			let boardY = y;
-			if (boardX === null || boardY === null) {
-				const slot = autoSlot(unsetIndex);
-				unsetIndex += 1;
-				boardX = x ?? slot.x;
-				boardY = y ?? slot.y;
-			}
-			pieces.push({
-				id: entry.file.path,
-				label: entry.file.basename,
-				x: boardX,
-				y: boardY,
+			const placed = x !== null && y !== null;
+			roster.push({
 				notePath: entry.file.path,
-				modelPath: modelId
-					? resolveModelPath(valueToString(entry.getValue(modelId)))
-					: null,
+				label: entry.file.basename,
+				placed,
+				piece: {
+					id: entry.file.path,
+					label: entry.file.basename,
+					x: x ?? 0,
+					y: y ?? 0,
+					notePath: entry.file.path,
+					modelPath: modelId
+						? resolveModelPath(valueToString(entry.getValue(modelId)))
+						: null,
+				},
 			});
 		}
 
-		return pieces;
+		return roster;
 	}
+
+	private onDragOver = (event: DragEvent): void => {
+		event.preventDefault();
+		if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+		this.hostEl.addClass('is-drop-target');
+	};
+
+	private onDragLeave = (event: DragEvent): void => {
+		if (event.relatedTarget instanceof Node && this.hostEl.contains(event.relatedTarget)) {
+			return;
+		}
+		this.hostEl.removeClass('is-drop-target');
+	};
+
+	private onDrop = (event: DragEvent): void => {
+		event.preventDefault();
+		this.hostEl.removeClass('is-drop-target');
+		const raw = event.dataTransfer?.getData(FIELD_NOTE_MIME);
+		if (!raw) return;
+		let path = '';
+		try {
+			path = (JSON.parse(raw) as { path?: string }).path ?? '';
+		} catch {
+			return;
+		}
+		if (!path) return;
+		const hit = this.renderer?.pickGround(event.clientX, event.clientY);
+		if (!hit) return;
+		const roster = this.collectRoster();
+		const item = roster.find((entry) => entry.notePath === path);
+		if (!item) return;
+		void this.persistPiece({ ...item.piece, x: hit.x, y: hit.z }, hit.x, hit.z);
+	};
 
 	private async persistPiece(piece: FieldPiece, x: number, y: number): Promise<void> {
 		if (!piece.notePath) return;
@@ -218,13 +280,6 @@ function readPath(value: unknown): string | null {
 
 function resolveModelPath(value: string | null): string | null {
 	return value ? unwrapLink(value) : null;
-}
-
-function autoSlot(index: number): { x: number; y: number } {
-	return {
-		x: (index % 8) * 1.6 - 5.6,
-		y: Math.floor(index / 8) * 1.6 - 2.4,
-	};
 }
 
 function roundCoord(value: number): number {
