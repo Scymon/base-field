@@ -711,7 +711,9 @@ function createConstructGrid(): { mesh: Mesh; uniforms: ConstructGridUniforms } 
 				// screen space; majors are 5× larger so their own fwidth stays
 				// dense and would remain inked after the small grid is gone.
 				float minorPix = max(fwidth(minorCoord.x), fwidth(minorCoord.y));
-				float lod = 1.0 - smoothstep(0.12, 0.52, minorPix);
+				// Finish while minor cells are still a few pixels — majors are
+				// thicker/higher-alpha, so a later cutoff leaves a hard lattice.
+				float lod = 1.0 - smoothstep(0.09, 0.34, minorPix);
 				float horizon = fade * lod;
 
 				float alpha = max(minor * uMinorAlpha, major * uMajorAlpha) * horizon;
