@@ -1,0 +1,30 @@
+{
+	"name": "base-field",
+	"version": "0.1.0",
+	"description": "Diablo-style visual fields for Obsidian notes and Bases.",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [
+		"obsidian",
+		"plugin",
+		"bases",
+		"fields"
+	],
+	"author": "David Schimke",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^22.15.17",
+		"@types/three": "^0.170.0",
+		"esbuild": "0.25.5",
+		"obsidian": "latest",
+		"typescript": "^5.8.3"
+	},
+	"dependencies": {
+		"three": "^0.170.0"
+	}
+}
