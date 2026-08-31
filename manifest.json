@@ -1,0 +1,10 @@
+{
+	"id": "base-field",
+	"name": "Fields",
+	"version": "0.1.0",
+	"minAppVersion": "1.10.2",
+	"description": "Diablo-style visual fields for notes and Bases: a tilted board of pawns on an optional map.",
+	"author": "David Schimke",
+	"authorUrl": "https://davidschimke.com",
+	"isDesktopOnly": false
+}
