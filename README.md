@@ -70,7 +70,7 @@ Example:
 
 If Bases is enabled, **Fields** appears in the same layout menu as Table, Cards, and List.
 
-The base query is the roster. Matching notes appear in the **Base filter** side pane; drag one onto the board to place it (writes `x` / `y`). Notes that already have coordinates stay on the field. File-explorer drops are not used in this mode.
+The base query is the roster. Matching notes appear in the **Base filter** side pane; drag one onto the board to place it (writes `x` / `y`). You can also drag a roster note from the file explorer onto the board — same gesture as a `.field` file. Notes that already have coordinates stay on the field. Notes that are not in the current query are ignored.
 
 View options:
 
