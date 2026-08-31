@@ -1,3 +1,4 @@
+import { DEFAULT_GROUND_SIZE, parseGroundSize } from './constants';
 import type { FieldCameraState, FieldFileData, FieldInstance } from './types';
 
 export const DEFAULT_CAMERA: FieldCameraState = {
@@ -13,6 +14,7 @@ export function createDefaultField(): FieldFileData {
 		version: 1,
 		camera: { ...DEFAULT_CAMERA, target: [0, 0] },
 		groundImage: null,
+		groundSize: DEFAULT_GROUND_SIZE,
 		instances: [
 			{
 				id: newId(),
@@ -70,6 +72,9 @@ function normalizeField(input: unknown): FieldFileData {
 		version: 1,
 		camera,
 		groundImage,
+		groundSize: parseGroundSize(
+			obj['groundSize'] === undefined ? DEFAULT_GROUND_SIZE : obj['groundSize'],
+		),
 		instances: instancesRaw
 			.map((item) => normalizeInstance(item))
 			.filter((item): item is FieldInstance => item !== null),

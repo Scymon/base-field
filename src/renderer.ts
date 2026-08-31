@@ -1,13 +1,14 @@
 import { normalizePath, type App } from 'obsidian';
 import {
 	AmbientLight,
+	BackSide,
 	Box3,
 	CanvasTexture,
 	Color,
 	CylinderGeometry,
 	DirectionalLight,
+	Fog,
 	Group,
-	GridHelper,
 	HemisphereLight,
 	LoadingManager,
 	Mesh,
@@ -19,6 +20,7 @@ import {
 	PlaneGeometry,
 	Raycaster,
 	Scene,
+	ShaderMaterial,
 	SphereGeometry,
 	Sprite,
 	SpriteMaterial,
@@ -31,7 +33,7 @@ import {
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
-import { DRAG_THRESHOLD_PX, GROUND_SIZE } from './constants';
+import { DEFAULT_GROUND_SIZE, DRAG_THRESHOLD_PX, parseGroundSize } from './constants';
 import type { CameraMode, FieldCameraState, FieldPiece, FieldSceneState } from './types';
 import { isRuntimeModelPath, resolveVaultFile, vaultResourceUrl } from './vault';
 
@@ -55,7 +57,12 @@ const SHARED_HEAD = new SphereGeometry(0.2, 12, 10);
 const MIN_ELEVATION = 0.4;
 const MAX_ELEVATION = 1.15;
 const MIN_DISTANCE = 6;
-const MAX_DISTANCE = 56;
+
+const SKY_ZENITH = 0xf7f8fa;
+const SKY_HORIZON = 0xd6dae1;
+const FOG_COLOR = 0xdde1e6;
+const GROUND_COLOR = 0xe6e8ec;
+const GRID_COLOR = 0x7d838c;
 
 export class FieldRenderer {
 	readonly canvas: HTMLCanvasElement;
@@ -70,7 +77,8 @@ export class FieldRenderer {
 	private readonly raycaster = new Raycaster();
 	private readonly pointer = new Vector2();
 	private readonly ground: Mesh;
-	private readonly grid: GridHelper;
+	private readonly grid: Mesh;
+	private readonly sky: Mesh;
 	private readonly piecesRoot = new Group();
 	private readonly nodes = new Map<string, PieceNode>();
 	private readonly modelCache = new Map<string, Object3D>();
@@ -88,6 +96,8 @@ export class FieldRenderer {
 	private observer: ResizeObserver | null = null;
 	private groundTexture: Texture | null = null;
 	private groundImagePath: string | null = null;
+	private groundSize: number = DEFAULT_GROUND_SIZE;
+	private groundShader: { uniforms: { uHalfSize: { value: number } } } | null = null;
 	private draggingId: string | null = null;
 	private dragMoved = false;
 	private pointerStart = new Vector2();
@@ -101,38 +111,47 @@ export class FieldRenderer {
 		this.app = app;
 		this.callbacks = callbacks;
 
-		this.scene.background = new Color(0x1b1f24);
-		this.perspective = new PerspectiveCamera(36, 1, 0.1, 200);
-		this.ortho = new OrthographicCamera(-10, 10, 10, -10, 0.1, 200);
+		this.scene.background = new Color(SKY_ZENITH);
+		this.scene.fog = new Fog(FOG_COLOR, 20, 200);
+		this.perspective = new PerspectiveCamera(36, 1, 0.1, 2000);
+		this.ortho = new OrthographicCamera(-10, 10, 10, -10, 0.1, 2000);
 
 		this.renderer = new WebGLRenderer({ antialias: true, alpha: false });
 		this.renderer.outputColorSpace = SRGBColorSpace;
+		this.renderer.setClearColor(SKY_ZENITH, 1);
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 		this.canvas = this.renderer.domElement;
 		this.canvas.classList.add('fields-canvas');
 		this.canvas.tabIndex = 0;
 		host.appendChild(this.canvas);
 
+		this.sky = createSkyDome();
+		this.scene.add(this.sky);
+
 		const groundMat = new MeshStandardMaterial({
-			color: 0x3d4a3a,
-			roughness: 0.92,
-			metalness: 0.02,
+			color: GROUND_COLOR,
+			roughness: 0.96,
+			metalness: 0,
 		});
-		this.ground = new Mesh(new PlaneGeometry(GROUND_SIZE, GROUND_SIZE), groundMat);
+		patchGroundFade(groundMat, (shader) => {
+			this.groundShader = shader;
+			shader.uniforms.uHalfSize.value = this.groundSize * 0.5;
+		});
+		this.ground = new Mesh(new PlaneGeometry(this.groundSize, this.groundSize), groundMat);
 		this.ground.rotation.x = -Math.PI / 2;
 		this.ground.receiveShadow = false;
 		this.scene.add(this.ground);
 
-		this.grid = new GridHelper(GROUND_SIZE, GROUND_SIZE / 2, 0x6b7a62, 0x4a5744);
-		this.grid.position.y = 0.01;
+		this.grid = createFadingGrid(this.groundSize);
 		this.scene.add(this.grid);
 
-		this.scene.add(new HemisphereLight(0xdde6ff, 0x2a241c, 0.7));
-		this.scene.add(new AmbientLight(0xffffff, 0.25));
-		const sun = new DirectionalLight(0xfff4e0, 0.85);
-		sun.position.set(8, 16, 6);
+		this.scene.add(new HemisphereLight(0xf4f6fa, 0xc5c2bb, 0.95));
+		this.scene.add(new AmbientLight(0xffffff, 0.4));
+		const sun = new DirectionalLight(0xfff3e4, 0.55);
+		sun.position.set(18, 34, 14);
 		this.scene.add(sun);
 		this.scene.add(this.piecesRoot);
+		this.updateAtmosphere();
 
 		this.bindEvents();
 		this.resize();
@@ -149,6 +168,7 @@ export class FieldRenderer {
 			this.elevation = state.camera.elevation;
 			this.applyCamera();
 		}
+		this.setGroundSize(parseGroundSize(state.groundSize ?? this.groundSize));
 		void this.setGroundImage(state.groundImagePath ?? null);
 		this.syncPieces(state.pieces);
 	}
@@ -189,6 +209,8 @@ export class FieldRenderer {
 		this.groundTexture?.dispose();
 		(this.ground.material as MeshStandardMaterial).dispose();
 		this.ground.geometry.dispose();
+		disposeObject3D(this.grid);
+		disposeObject3D(this.sky);
 		this.renderer.dispose();
 		this.canvas.remove();
 	}
@@ -311,7 +333,7 @@ export class FieldRenderer {
 	private onWheel = (event: WheelEvent): void => {
 		event.preventDefault();
 		const factor = Math.exp(event.deltaY * 0.0012);
-		this.distance = clamp(this.distance * factor, MIN_DISTANCE, MAX_DISTANCE);
+		this.distance = clamp(this.distance * factor, MIN_DISTANCE, this.maxDistance());
 		this.applyCamera();
 		this.emitCamera();
 	};
@@ -326,6 +348,7 @@ export class FieldRenderer {
 		const right = new Vector3().crossVectors(forward, new Vector3(0, 1, 0)).normalize();
 		this.target.x -= right.x * dx * scale + forward.x * dy * scale;
 		this.target.z -= right.z * dx * scale + forward.z * dy * scale;
+		this.clampTarget();
 		this.applyCamera();
 		this.emitCamera();
 	}
@@ -353,6 +376,52 @@ export class FieldRenderer {
 		this.ortho.top = halfH;
 		this.ortho.bottom = -halfH;
 		this.ortho.updateProjectionMatrix();
+		this.updateAtmosphere();
+	}
+
+	private setGroundSize(size: number): void {
+		if (size === this.groundSize) {
+			this.distance = clamp(this.distance, MIN_DISTANCE, this.maxDistance());
+			return;
+		}
+		this.groundSize = size;
+		this.ground.geometry.dispose();
+		this.ground.geometry = new PlaneGeometry(size, size);
+		this.grid.geometry.dispose();
+		this.grid.geometry = new PlaneGeometry(size, size);
+		const gridMat = this.grid.material as ShaderMaterial;
+		gridMat.uniforms['uHalf']!.value = size * 0.5;
+		if (this.groundShader) this.groundShader.uniforms.uHalfSize.value = size * 0.5;
+		this.distance = clamp(this.distance, MIN_DISTANCE, this.maxDistance());
+		this.clampTarget();
+		this.applyCamera();
+	}
+
+	private maxDistance(): number {
+		return clamp(this.groundSize * 0.55, 80, 720);
+	}
+
+	private clampTarget(): void {
+		const limit = this.groundSize * 0.45;
+		this.target.x = clamp(this.target.x, -limit, limit);
+		this.target.z = clamp(this.target.z, -limit, limit);
+	}
+
+	private updateAtmosphere(): void {
+		const far = Math.max(1200, this.groundSize * 2.5 + this.maxDistance() * 2);
+		this.perspective.far = far;
+		this.ortho.far = far;
+		this.perspective.updateProjectionMatrix();
+		this.ortho.updateProjectionMatrix();
+
+		const fog = this.scene.fog;
+		if (fog instanceof Fog) {
+			fog.near = this.distance * 0.95;
+			fog.far = Math.max(this.distance * 3.4, this.groundSize * 0.42);
+		}
+
+		this.sky.position.copy(this.activeCamera.position);
+		this.sky.scale.setScalar(far * 0.32);
 	}
 
 	private snapshotCamera(): FieldCameraState {
@@ -450,7 +519,7 @@ export class FieldRenderer {
 		this.groundTexture = null;
 		if (!path) {
 			material.map = null;
-			material.color.set(0x3d4a3a);
+			material.color.set(GROUND_COLOR);
 			material.needsUpdate = true;
 			this.grid.visible = true;
 			return;
@@ -535,7 +604,7 @@ export class FieldRenderer {
 		this.raycaster.setFromCamera(this.pointer, this.activeCamera);
 		const point = new Vector3();
 		if (this.raycaster.ray.intersectPlane(GROUND_PLANE, point)) {
-			const half = GROUND_SIZE / 2;
+			const half = this.groundSize / 2;
 			point.x = clamp(point.x, -half, half);
 			point.z = clamp(point.z, -half, half);
 			return point;
@@ -548,6 +617,141 @@ export class FieldRenderer {
 		this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
 		this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 	}
+}
+
+function createSkyDome(): Mesh {
+	const material = new ShaderMaterial({
+		name: 'FieldsSky',
+		side: BackSide,
+		depthWrite: false,
+		depthTest: false,
+		fog: false,
+		uniforms: {
+			uZenith: { value: new Color(SKY_ZENITH) },
+			uHorizon: { value: new Color(SKY_HORIZON) },
+		},
+		vertexShader: `
+			varying vec3 vDir;
+			void main() {
+				vDir = normalize(position);
+				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+			}
+		`,
+		fragmentShader: `
+			varying vec3 vDir;
+			uniform vec3 uZenith;
+			uniform vec3 uHorizon;
+			void main() {
+				float t = smoothstep(-0.04, 0.7, vDir.y);
+				gl_FragColor = vec4(mix(uHorizon, uZenith, t), 1.0);
+			}
+		`,
+	});
+	const mesh = new Mesh(new SphereGeometry(1, 32, 16), material);
+	mesh.renderOrder = -1;
+	mesh.frustumCulled = false;
+	return mesh;
+}
+
+function createFadingGrid(size: number): Mesh {
+	const material = new ShaderMaterial({
+		name: 'FieldsGrid',
+		transparent: true,
+		depthWrite: false,
+		fog: true,
+		uniforms: {
+			uColor: { value: new Color(GRID_COLOR) },
+			uHalf: { value: size * 0.5 },
+			uCell: { value: 2 },
+		},
+		vertexShader: `
+			varying vec2 vWorldXZ;
+			#include <common>
+			#include <fog_pars_vertex>
+			void main() {
+				vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+				vWorldXZ = worldPosition.xz;
+				vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+				gl_Position = projectionMatrix * mvPosition;
+				#include <fog_vertex>
+			}
+		`,
+		fragmentShader: `
+			varying vec2 vWorldXZ;
+			uniform vec3 uColor;
+			uniform float uHalf;
+			uniform float uCell;
+			#include <common>
+			#include <fog_pars_fragment>
+			void main() {
+				vec2 coord = vWorldXZ / uCell;
+				vec2 deriv = fwidth(coord);
+				vec2 line = abs(fract(coord - 0.5) - 0.5) / max(deriv, vec2(1e-6));
+				float minor = 1.0 - min(min(line.x, line.y), 1.0);
+
+				vec2 majorCoord = vWorldXZ / (uCell * 5.0);
+				vec2 majorDeriv = fwidth(majorCoord);
+				vec2 majorLine = abs(fract(majorCoord - 0.5) - 0.5) / max(majorDeriv, vec2(1e-6));
+				float major = 1.0 - min(min(majorLine.x, majorLine.y), 1.0);
+
+				float dist = length(vWorldXZ) / max(uHalf, 0.001);
+				float fade = 1.0 - smoothstep(0.42, 0.92, dist);
+				float alpha = max(minor * 0.26, major * 0.4) * fade;
+				if (alpha < 0.01) discard;
+				gl_FragColor = vec4(uColor, alpha);
+				#include <fog_fragment>
+			}
+		`,
+	});
+	const mesh = new Mesh(new PlaneGeometry(size, size), material);
+	mesh.rotation.x = -Math.PI / 2;
+	mesh.position.y = 0.015;
+	mesh.renderOrder = 1;
+	return mesh;
+}
+
+function patchGroundFade(
+	material: MeshStandardMaterial,
+	onCompile: (shader: { uniforms: { uHalfSize: { value: number } } }) => void,
+): void {
+	material.onBeforeCompile = (shader) => {
+		shader.uniforms['uHalfSize'] = { value: DEFAULT_GROUND_SIZE * 0.5 };
+		shader.uniforms['uHorizon'] = { value: new Color(FOG_COLOR) };
+		shader.vertexShader = shader.vertexShader
+			.replace('#include <common>', '#include <common>\nvarying vec2 vBoardXZ;')
+			.replace(
+				'#include <project_vertex>',
+				'#include <project_vertex>\nvBoardXZ = (modelMatrix * vec4(transformed, 1.0)).xz;',
+			);
+		shader.fragmentShader = shader.fragmentShader
+			.replace(
+				'#include <common>',
+				'#include <common>\nvarying vec2 vBoardXZ;\nuniform float uHalfSize;\nuniform vec3 uHorizon;',
+			)
+			.replace(
+				'vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;',
+				`vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;
+				float boardDist = length(vBoardXZ) / max(uHalfSize, 0.001);
+				float boardFade = 1.0 - smoothstep(0.55, 0.97, boardDist);
+				outgoingLight = mix(uHorizon, outgoingLight, boardFade);`,
+			);
+		onCompile(shader as unknown as { uniforms: { uHalfSize: { value: number } } });
+	};
+	material.customProgramCacheKey = () => 'fields-ground-horizon';
+}
+
+function disposeObject3D(object: Object3D): void {
+	object.traverse((node) => {
+		if (node instanceof Mesh) {
+			node.geometry.dispose();
+			if (Array.isArray(node.material)) {
+				node.material.forEach((material) => material.dispose());
+			} else {
+				node.material.dispose();
+			}
+		}
+	});
+	object.removeFromParent();
 }
 
 function vaultLoadingManager(app: App, modelPath: string): LoadingManager {
@@ -588,10 +792,10 @@ function createLabelSprite(text: string): Sprite {
 	const ctx = canvas.getContext('2d');
 	if (ctx) {
 		ctx.clearRect(0, 0, 256, 64);
-		ctx.fillStyle = 'rgba(12, 14, 16, 0.62)';
+		ctx.fillStyle = 'rgba(22, 24, 28, 0.82)';
 		roundRect(ctx, 8, 10, 240, 44, 10);
 		ctx.fill();
-		ctx.fillStyle = '#f4f1ea';
+		ctx.fillStyle = '#f6f4ee';
 		ctx.font = '600 26px ui-sans-serif, system-ui, sans-serif';
 		ctx.textAlign = 'center';
 		ctx.textBaseline = 'middle';
@@ -659,7 +863,7 @@ function colorFor(seed: string): number {
 		hash = (hash * 31 + seed.charCodeAt(i)) | 0;
 	}
 	const hue = Math.abs(hash) % 360;
-	return new Color().setHSL(hue / 360, 0.42, 0.52).getHex();
+	return new Color().setHSL(hue / 360, 0.54, 0.4).getHex();
 }
 
 function ellipsize(text: string, max: number): string {
