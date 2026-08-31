@@ -345,6 +345,7 @@ export class FieldRenderer {
 		this.emitCamera();
 	};
 
+	/** Grab-the-world: keep the ground point under the cursor as the pointer moves. */
 	private panByPointer(event: PointerEvent): void {
 		const hit = this.intersectGround(event, false);
 		if (!hit || !this.panLast) {
@@ -383,6 +384,8 @@ export class FieldRenderer {
 		this.ortho.bottom = -halfH;
 		this.ortho.updateProjectionMatrix();
 		this.updateCameraRange();
+		this.perspective.updateMatrixWorld();
+		this.ortho.updateMatrixWorld();
 	}
 
 	private setGroundSize(size: number): void {
