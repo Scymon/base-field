@@ -1,13 +1,11 @@
 import { normalizePath, type App } from 'obsidian';
 import {
 	AmbientLight,
-	BackSide,
 	Box3,
 	CanvasTexture,
 	Color,
 	CylinderGeometry,
 	DirectionalLight,
-	Fog,
 	Group,
 	HemisphereLight,
 	LoadingManager,
@@ -58,11 +56,9 @@ const MIN_ELEVATION = 0.4;
 const MAX_ELEVATION = 1.15;
 const MIN_DISTANCE = 6;
 
-const SKY_ZENITH = 0xf7f8fa;
-const SKY_HORIZON = 0xd6dae1;
-const FOG_COLOR = 0xdde1e6;
-const GROUND_COLOR = 0xe6e8ec;
-const GRID_COLOR = 0x7d838c;
+const SKY_ZENITH = 0xf3f4f6;
+const GROUND_COLOR = 0xc4c6cb;
+const GRID_COLOR = 0x2c323a;
 
 export class FieldRenderer {
 	readonly canvas: HTMLCanvasElement;
@@ -78,7 +74,13 @@ export class FieldRenderer {
 	private readonly pointer = new Vector2();
 	private readonly ground: Mesh;
 	private readonly grid: Mesh;
-	private readonly sky: Mesh;
+	private readonly gridUniforms: {
+		uColor: { value: Color };
+		uHalf: { value: number };
+		uCell: { value: number };
+	};
+	private readonly rimAlpha: CanvasTexture;
+	private readonly skyBackground: CanvasTexture;
 	private readonly piecesRoot = new Group();
 	private readonly nodes = new Map<string, PieceNode>();
 	private readonly modelCache = new Map<string, Object3D>();
@@ -97,8 +99,8 @@ export class FieldRenderer {
 	private groundTexture: Texture | null = null;
 	private groundImagePath: string | null = null;
 	private groundSize: number = DEFAULT_GROUND_SIZE;
-	private groundShader: { uniforms: { uHalfSize: { value: number } } } | null = null;
 	private draggingId: string | null = null;
+	private panLast: Vector3 | null = null;
 	private dragMoved = false;
 	private pointerStart = new Vector2();
 	private boardAction: 'none' | 'pan' | 'orbit' = 'none';
@@ -111,8 +113,9 @@ export class FieldRenderer {
 		this.app = app;
 		this.callbacks = callbacks;
 
-		this.scene.background = new Color(SKY_ZENITH);
-		this.scene.fog = new Fog(FOG_COLOR, 20, 200);
+		this.skyBackground = createSkyBackground();
+		this.scene.background = this.skyBackground;
+		this.scene.fog = null;
 		this.perspective = new PerspectiveCamera(36, 1, 0.1, 2000);
 		this.ortho = new OrthographicCamera(-10, 10, 10, -10, 0.1, 2000);
 
@@ -125,33 +128,33 @@ export class FieldRenderer {
 		this.canvas.tabIndex = 0;
 		host.appendChild(this.canvas);
 
-		this.sky = createSkyDome();
-		this.scene.add(this.sky);
-
+		this.rimAlpha = createRimAlphaMap();
 		const groundMat = new MeshStandardMaterial({
 			color: GROUND_COLOR,
 			roughness: 0.96,
 			metalness: 0,
-		});
-		patchGroundFade(groundMat, (shader) => {
-			this.groundShader = shader;
-			shader.uniforms.uHalfSize.value = this.groundSize * 0.5;
+			fog: false,
+			transparent: true,
+			alphaMap: this.rimAlpha,
+			depthWrite: true,
 		});
 		this.ground = new Mesh(new PlaneGeometry(this.groundSize, this.groundSize), groundMat);
 		this.ground.rotation.x = -Math.PI / 2;
 		this.ground.receiveShadow = false;
 		this.scene.add(this.ground);
 
-		this.grid = createFadingGrid(this.groundSize);
+		const grid = createFadingGrid(this.groundSize);
+		this.grid = grid.mesh;
+		this.gridUniforms = grid.uniforms;
 		this.scene.add(this.grid);
 
-		this.scene.add(new HemisphereLight(0xf4f6fa, 0xc5c2bb, 0.95));
-		this.scene.add(new AmbientLight(0xffffff, 0.4));
-		const sun = new DirectionalLight(0xfff3e4, 0.55);
+		this.scene.add(new HemisphereLight(0xf3f5f8, 0xb4b0a9, 0.8));
+		this.scene.add(new AmbientLight(0xffffff, 0.32));
+		const sun = new DirectionalLight(0xfff3e4, 0.75);
 		sun.position.set(18, 34, 14);
 		this.scene.add(sun);
 		this.scene.add(this.piecesRoot);
-		this.updateAtmosphere();
+		this.updateCameraRange();
 
 		this.bindEvents();
 		this.resize();
@@ -207,10 +210,11 @@ export class FieldRenderer {
 		this.nodes.forEach((node) => this.disposeNode(node));
 		this.nodes.clear();
 		this.groundTexture?.dispose();
+		this.rimAlpha.dispose();
+		this.skyBackground.dispose();
 		(this.ground.material as MeshStandardMaterial).dispose();
 		this.ground.geometry.dispose();
 		disposeObject3D(this.grid);
-		disposeObject3D(this.sky);
 		this.renderer.dispose();
 		this.canvas.remove();
 	}
@@ -256,6 +260,8 @@ export class FieldRenderer {
 
 		this.draggingId = null;
 		this.boardAction = event.button === 2 || event.altKey ? 'orbit' : 'pan';
+		this.panLast =
+			this.boardAction === 'pan' ? this.intersectGround(event, false) : null;
 	};
 
 	private onPointerMove = (event: PointerEvent): void => {
@@ -278,7 +284,7 @@ export class FieldRenderer {
 		}
 
 		if (this.boardAction === 'pan') {
-			this.panByDelta(event.movementX, event.movementY);
+			this.panByPointer(event);
 			this.canvas.style.cursor = 'grabbing';
 			return;
 		}
@@ -327,6 +333,7 @@ export class FieldRenderer {
 
 		this.draggingId = null;
 		this.boardAction = 'none';
+		this.panLast = null;
 		this.canvas.style.cursor = this.hoveredId ? 'pointer' : 'grab';
 	};
 
@@ -338,19 +345,18 @@ export class FieldRenderer {
 		this.emitCamera();
 	};
 
-	private panByDelta(dx: number, dy: number): void {
-		const scale = this.distance * 0.0022;
-		const forward = new Vector3();
-		this.activeCamera.getWorldDirection(forward);
-		forward.y = 0;
-		if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
-		forward.normalize();
-		const right = new Vector3().crossVectors(forward, new Vector3(0, 1, 0)).normalize();
-		this.target.x -= right.x * dx * scale + forward.x * dy * scale;
-		this.target.z -= right.z * dx * scale + forward.z * dy * scale;
+	private panByPointer(event: PointerEvent): void {
+		const hit = this.intersectGround(event, false);
+		if (!hit || !this.panLast) {
+			this.panLast = hit;
+			return;
+		}
+		this.target.x += this.panLast.x - hit.x;
+		this.target.z += this.panLast.z - hit.z;
 		this.clampTarget();
 		this.applyCamera();
 		this.emitCamera();
+		this.panLast = this.intersectGround(event, false);
 	}
 
 	private applyCamera(): void {
@@ -376,7 +382,7 @@ export class FieldRenderer {
 		this.ortho.top = halfH;
 		this.ortho.bottom = -halfH;
 		this.ortho.updateProjectionMatrix();
-		this.updateAtmosphere();
+		this.updateCameraRange();
 	}
 
 	private setGroundSize(size: number): void {
@@ -389,9 +395,7 @@ export class FieldRenderer {
 		this.ground.geometry = new PlaneGeometry(size, size);
 		this.grid.geometry.dispose();
 		this.grid.geometry = new PlaneGeometry(size, size);
-		const gridMat = this.grid.material as ShaderMaterial;
-		gridMat.uniforms['uHalf']!.value = size * 0.5;
-		if (this.groundShader) this.groundShader.uniforms.uHalfSize.value = size * 0.5;
+		this.gridUniforms.uHalf.value = size * 0.5;
 		this.distance = clamp(this.distance, MIN_DISTANCE, this.maxDistance());
 		this.clampTarget();
 		this.applyCamera();
@@ -407,21 +411,12 @@ export class FieldRenderer {
 		this.target.z = clamp(this.target.z, -limit, limit);
 	}
 
-	private updateAtmosphere(): void {
+	private updateCameraRange(): void {
 		const far = Math.max(1200, this.groundSize * 2.5 + this.maxDistance() * 2);
 		this.perspective.far = far;
 		this.ortho.far = far;
 		this.perspective.updateProjectionMatrix();
 		this.ortho.updateProjectionMatrix();
-
-		const fog = this.scene.fog;
-		if (fog instanceof Fog) {
-			fog.near = this.distance * 0.95;
-			fog.far = Math.max(this.distance * 3.4, this.groundSize * 0.42);
-		}
-
-		this.sky.position.copy(this.activeCamera.position);
-		this.sky.scale.setScalar(far * 0.32);
 	}
 
 	private snapshotCamera(): FieldCameraState {
@@ -599,14 +594,16 @@ export class FieldRenderer {
 		return null;
 	}
 
-	private intersectGround(event: PointerEvent): Vector3 | null {
+	private intersectGround(event: PointerEvent, clampToBoard = true): Vector3 | null {
 		this.setPointer(event);
 		this.raycaster.setFromCamera(this.pointer, this.activeCamera);
 		const point = new Vector3();
 		if (this.raycaster.ray.intersectPlane(GROUND_PLANE, point)) {
-			const half = this.groundSize / 2;
-			point.x = clamp(point.x, -half, half);
-			point.z = clamp(point.z, -half, half);
+			if (clampToBoard) {
+				const half = this.groundSize / 2;
+				point.x = clamp(point.x, -half, half);
+				point.z = clamp(point.z, -half, half);
+			}
 			return point;
 		}
 		return null;
@@ -619,61 +616,64 @@ export class FieldRenderer {
 	}
 }
 
-function createSkyDome(): Mesh {
-	const material = new ShaderMaterial({
-		name: 'FieldsSky',
-		side: BackSide,
-		depthWrite: false,
-		depthTest: false,
-		fog: false,
-		uniforms: {
-			uZenith: { value: new Color(SKY_ZENITH) },
-			uHorizon: { value: new Color(SKY_HORIZON) },
-		},
-		vertexShader: `
-			varying vec3 vDir;
-			void main() {
-				vDir = normalize(position);
-				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-			}
-		`,
-		fragmentShader: `
-			varying vec3 vDir;
-			uniform vec3 uZenith;
-			uniform vec3 uHorizon;
-			void main() {
-				float t = smoothstep(-0.04, 0.7, vDir.y);
-				gl_FragColor = vec4(mix(uHorizon, uZenith, t), 1.0);
-			}
-		`,
-	});
-	const mesh = new Mesh(new SphereGeometry(1, 32, 16), material);
-	mesh.renderOrder = -1;
-	mesh.frustumCulled = false;
-	return mesh;
+function createSkyBackground(): CanvasTexture {
+	const canvas = document.createElement('canvas');
+	canvas.width = 2;
+	canvas.height = 256;
+	const ctx = canvas.getContext('2d');
+	if (ctx) {
+		const gradient = ctx.createLinearGradient(0, 0, 0, 256);
+		gradient.addColorStop(0, '#f3f4f6');
+		gradient.addColorStop(1, '#e2e4e8');
+		ctx.fillStyle = gradient;
+		ctx.fillRect(0, 0, 2, 256);
+	}
+	const texture = new CanvasTexture(canvas);
+	texture.colorSpace = SRGBColorSpace;
+	return texture;
 }
 
-function createFadingGrid(size: number): Mesh {
+function createRimAlphaMap(): CanvasTexture {
+	const canvas = document.createElement('canvas');
+	canvas.width = 256;
+	canvas.height = 256;
+	const ctx = canvas.getContext('2d');
+	if (ctx) {
+		const gradient = ctx.createRadialGradient(128, 128, 108, 128, 128, 128);
+		gradient.addColorStop(0, '#ffffff');
+		gradient.addColorStop(1, '#000000');
+		ctx.fillStyle = gradient;
+		ctx.fillRect(0, 0, 256, 256);
+	}
+	const texture = new CanvasTexture(canvas);
+	return texture;
+}
+
+function createFadingGrid(size: number): {
+	mesh: Mesh;
+	uniforms: {
+		uColor: { value: Color };
+		uHalf: { value: number };
+		uCell: { value: number };
+	};
+} {
+	const uniforms = {
+		uColor: { value: new Color(GRID_COLOR) },
+		uHalf: { value: size * 0.5 },
+		uCell: { value: 2 },
+	};
 	const material = new ShaderMaterial({
 		name: 'FieldsGrid',
 		transparent: true,
 		depthWrite: false,
-		fog: true,
-		uniforms: {
-			uColor: { value: new Color(GRID_COLOR) },
-			uHalf: { value: size * 0.5 },
-			uCell: { value: 2 },
-		},
+		fog: false,
+		toneMapped: false,
+		uniforms,
 		vertexShader: `
 			varying vec2 vWorldXZ;
-			#include <common>
-			#include <fog_pars_vertex>
 			void main() {
-				vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-				vWorldXZ = worldPosition.xz;
-				vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-				gl_Position = projectionMatrix * mvPosition;
-				#include <fog_vertex>
+				vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;
+				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 			}
 		`,
 		fragmentShader: `
@@ -681,63 +681,30 @@ function createFadingGrid(size: number): Mesh {
 			uniform vec3 uColor;
 			uniform float uHalf;
 			uniform float uCell;
-			#include <common>
-			#include <fog_pars_fragment>
 			void main() {
 				vec2 coord = vWorldXZ / uCell;
 				vec2 deriv = fwidth(coord);
 				vec2 line = abs(fract(coord - 0.5) - 0.5) / max(deriv, vec2(1e-6));
-				float minor = 1.0 - min(min(line.x, line.y), 1.0);
+				float minor = 1.0 - smoothstep(0.0, 1.25, min(line.x, line.y));
 
 				vec2 majorCoord = vWorldXZ / (uCell * 5.0);
 				vec2 majorDeriv = fwidth(majorCoord);
 				vec2 majorLine = abs(fract(majorCoord - 0.5) - 0.5) / max(majorDeriv, vec2(1e-6));
-				float major = 1.0 - min(min(majorLine.x, majorLine.y), 1.0);
+				float major = 1.0 - smoothstep(0.0, 1.4, min(majorLine.x, majorLine.y));
 
-				float dist = length(vWorldXZ) / max(uHalf, 0.001);
-				float fade = 1.0 - smoothstep(0.42, 0.92, dist);
-				float alpha = max(minor * 0.26, major * 0.4) * fade;
-				if (alpha < 0.01) discard;
+				float rim = length(vWorldXZ) / max(uHalf, 0.001);
+				float fade = 1.0 - smoothstep(0.58, 0.96, rim);
+				float alpha = max(minor * 0.78, major * 0.95) * fade;
+				if (alpha < 0.02) discard;
 				gl_FragColor = vec4(uColor, alpha);
-				#include <fog_fragment>
 			}
 		`,
 	});
 	const mesh = new Mesh(new PlaneGeometry(size, size), material);
 	mesh.rotation.x = -Math.PI / 2;
-	mesh.position.y = 0.015;
+	mesh.position.y = 0.02;
 	mesh.renderOrder = 1;
-	return mesh;
-}
-
-function patchGroundFade(
-	material: MeshStandardMaterial,
-	onCompile: (shader: { uniforms: { uHalfSize: { value: number } } }) => void,
-): void {
-	material.onBeforeCompile = (shader) => {
-		shader.uniforms['uHalfSize'] = { value: DEFAULT_GROUND_SIZE * 0.5 };
-		shader.uniforms['uHorizon'] = { value: new Color(FOG_COLOR) };
-		shader.vertexShader = shader.vertexShader
-			.replace('#include <common>', '#include <common>\nvarying vec2 vBoardXZ;')
-			.replace(
-				'#include <project_vertex>',
-				'#include <project_vertex>\nvBoardXZ = (modelMatrix * vec4(transformed, 1.0)).xz;',
-			);
-		shader.fragmentShader = shader.fragmentShader
-			.replace(
-				'#include <common>',
-				'#include <common>\nvarying vec2 vBoardXZ;\nuniform float uHalfSize;\nuniform vec3 uHorizon;',
-			)
-			.replace(
-				'vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;',
-				`vec3 outgoingLight = totalDiffuse + totalSpecular + totalEmissiveRadiance;
-				float boardDist = length(vBoardXZ) / max(uHalfSize, 0.001);
-				float boardFade = 1.0 - smoothstep(0.55, 0.97, boardDist);
-				outgoingLight = mix(uHorizon, outgoingLight, boardFade);`,
-			);
-		onCompile(shader as unknown as { uniforms: { uHalfSize: { value: number } } });
-	};
-	material.customProgramCacheKey = () => 'fields-ground-horizon';
+	return { mesh, uniforms };
 }
 
 function disposeObject3D(object: Object3D): void {
@@ -774,6 +741,7 @@ function createDefaultPawn(color: number): Group {
 		color,
 		roughness: 0.45,
 		metalness: 0.08,
+		fog: false,
 	});
 	const base = new Mesh(SHARED_BASE, material);
 	base.position.y = 0.05;

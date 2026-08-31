@@ -39,7 +39,7 @@ Standalone boards, similar to `.canvas` files.
 
 - Command palette: **Fields: Create new field**, or the map ribbon icon.
 - The JSON stores camera, optional `groundImage` vault path, `groundSize`, and `instances`.
-- The board is large by default so it recedes into a pale horizon. Use the toolbar size button (or `groundSize` in the file) to shrink it.
+- The board is large by default. Nearby you see a clear grid; it fades to transparent toward the rim. Use the toolbar size button (or `groundSize` in the file) to shrink it.
 - Instances can be **notes** (`kind: "note"`, `path`) or **custom pieces** (`kind: "piece"`, `label`).
 - Either kind may set `model` to a vault path.
 
@@ -107,4 +107,4 @@ npm run dev     # watch build
 npm run build   # typecheck + production bundle
 ```
 
-The board uses a light sky, distance fog, and a grid that fades toward the horizon. Existing `.field` files without `groundSize` open at the large default.
+The board uses a pale background and a grid that fades to transparent at the rim — no scene fog. Existing `.field` files without `groundSize` open at the large default.
