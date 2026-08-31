@@ -22,7 +22,7 @@ import {
 	POSITION_DECIMALS,
 	parseGroundSize,
 } from './constants';
-import { FIELD_NOTE_MIME } from './drops';
+import { FIELD_NOTE_MIME, acceptBoardDrag } from './drops';
 import { DEFAULT_CAMERA } from './field-file';
 import { FieldRenderer } from './renderer';
 import type { CameraMode, FieldCameraState, FieldPiece } from './types';
@@ -193,8 +193,7 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 	}
 
 	private onDragOver = (event: DragEvent): void => {
-		event.preventDefault();
-		if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+		acceptBoardDrag(event);
 		this.hostEl.addClass('is-drop-target');
 	};
 
@@ -206,7 +205,7 @@ export class FieldsBasesView extends BasesView implements HoverParent {
 	};
 
 	private onDrop = (event: DragEvent): void => {
-		event.preventDefault();
+		acceptBoardDrag(event);
 		this.hostEl.removeClass('is-drop-target');
 		const raw = event.dataTransfer?.getData(FIELD_NOTE_MIME);
 		if (!raw) return;

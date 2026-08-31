@@ -38,7 +38,7 @@ Both use the same Three.js board renderer.
 Standalone boards, similar to `.canvas` files.
 
 - Command palette: **Fields: Create new field**, or the map ribbon icon.
-- Drag a note from the file explorer onto the board to place it under the cursor.
+- Drag a note from the file explorer (or a `[[wiki link]]` / markdown link) onto the board to place it under the cursor. The drop uses the same `app.dragManager` + `text/plain` / `text/uri-list` path Canvas does, and stops the workspace from opening the file instead.
 - The **Components** side pane is a palette of piece types. Drag one onto the board to instance it. **Add** creates a new named component.
 - The JSON stores camera, optional `groundImage` vault path, `groundSize`, `components`, and `instances`.
 - The board is a Matrix-style white construct: dark grid lines on an open white field, fading out over a long distance. There is no solid ground plate. Use the toolbar size button (or `groundSize` in the file) to change how far you can pan.

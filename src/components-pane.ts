@@ -65,7 +65,7 @@ export class ComponentsPane {
 					event.dataTransfer.setData('text/plain', item.drop.label);
 				} else {
 					event.dataTransfer.setData(FIELD_NOTE_MIME, JSON.stringify({ path: item.drop.path }));
-					event.dataTransfer.setData('text/plain', item.drop.path);
+					event.dataTransfer.setData('text/plain', `[[${item.drop.path}]]`);
 				}
 				row.addClass('is-dragging');
 			});

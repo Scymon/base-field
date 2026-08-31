@@ -1,5 +1,5 @@
 import { TFile, type App } from 'obsidian';
-import { unwrapLink } from './vault';
+import { resolveVaultFile, unwrapLink } from './vault';
 
 export const FIELD_COMPONENT_MIME = 'application/x-base-field-component';
 export const FIELD_NOTE_MIME = 'application/x-base-field-note';
@@ -17,17 +17,32 @@ export interface NoteDrop {
 
 export type BoardDrop = ComponentDrop | NoteDrop;
 
+/**
+ * Obsidian's unpublished drag payload (file explorer, graph, link chips).
+ * Same shape Excalidraw / Canvas read via `app.dragManager.draggable`.
+ */
 interface ExplorerDraggable {
-	type?: string;
+	type?: 'file' | 'files' | 'link' | 'text' | string;
 	file?: TFile;
 	files?: TFile[];
+	title?: string;
+	text?: string;
+	linktext?: string;
+	sourcePath?: string;
 }
 
 interface AppWithDragManager extends App {
 	dragManager?: { draggable?: ExplorerDraggable | null };
 }
 
-export function parseBoardDrop(app: App, event: DragEvent): BoardDrop[] {
+/** Accept the drop and stop workspace from opening the file in a new leaf. */
+export function acceptBoardDrag(event: DragEvent): void {
+	event.preventDefault();
+	event.stopPropagation();
+	if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+}
+
+export function parseBoardDrop(app: App, event: DragEvent, sourcePath = ''): BoardDrop[] {
 	const dt = event.dataTransfer;
 	if (!dt) return [];
 
@@ -54,7 +69,7 @@ export function parseBoardDrop(app: App, event: DragEvent): BoardDrop[] {
 		try {
 			const parsed = JSON.parse(noteRaw) as { path?: string };
 			if (parsed.path) {
-				const file = resolveDroppedPath(app, parsed.path);
+				const file = resolveDroppedPath(app, parsed.path, sourcePath);
 				if (file) return [{ kind: 'note', path: file.path }];
 			}
 		} catch {
@@ -62,13 +77,13 @@ export function parseBoardDrop(app: App, event: DragEvent): BoardDrop[] {
 		}
 	}
 
-	return filesFromExplorer(app, dt).map((file) => ({ kind: 'note', path: file.path }));
+	return filesFromExplorer(app, dt, sourcePath).map((file) => ({
+		kind: 'note' as const,
+		path: file.path,
+	}));
 }
 
-export function filesFromExplorer(app: App, dt: DataTransfer): TFile[] {
-	const fromManager = filesFromDragManager(app);
-	if (fromManager.length) return fromManager.filter((file) => file.extension === 'md');
-
+export function filesFromExplorer(app: App, dt: DataTransfer, sourcePath = ''): TFile[] {
 	const seen = new Set<string>();
 	const files: TFile[] = [];
 	const add = (file: TFile | null): void => {
@@ -77,34 +92,65 @@ export function filesFromExplorer(app: App, dt: DataTransfer): TFile[] {
 		files.push(file);
 	};
 
-	const plain = dt.getData('text/plain') || dt.getData('text/uri-list');
-	if (plain) {
-		for (const token of tokenizeDropText(plain)) {
-			add(resolveDroppedPath(app, token));
+	const draggable = (app as AppWithDragManager).dragManager?.draggable;
+	if (draggable) {
+		if (draggable.file instanceof TFile) add(draggable.file);
+		if (Array.isArray(draggable.files)) {
+			for (const file of draggable.files) {
+				if (file instanceof TFile) add(file);
+			}
 		}
+		const linkSource = draggable.sourcePath ?? sourcePath;
+		for (const token of collectLinkTokens(
+			[draggable.title, draggable.text, draggable.linktext].filter(
+				(value): value is string => typeof value === 'string',
+			),
+		)) {
+			add(resolveDroppedPath(app, token, linkSource));
+		}
+	}
+
+	for (const token of collectLinkTokens([
+		dt.getData('text/plain'),
+		dt.getData('text/uri-list'),
+	])) {
+		add(resolveDroppedPath(app, token, sourcePath));
 	}
 
 	return files;
 }
 
-function filesFromDragManager(app: App): TFile[] {
-	const draggable = (app as AppWithDragManager).dragManager?.draggable;
-	if (!draggable) return [];
-	if (draggable.file instanceof TFile) return [draggable.file];
-	if (Array.isArray(draggable.files)) {
-		return draggable.files.filter((file): file is TFile => file instanceof TFile);
+function collectLinkTokens(chunks: string[]): string[] {
+	const tokens: string[] = [];
+	for (const chunk of chunks) {
+		if (!chunk) continue;
+		tokens.push(...extractLinkTokens(chunk));
 	}
-	return [];
+	return tokens;
 }
 
-function tokenizeDropText(text: string): string[] {
+/** Split explorer / editor drop text the way Canvas does: wiki links, md links, paths, obsidian:// URLs. */
+export function extractLinkTokens(text: string): string[] {
+	const tokens: string[] = [];
+	const wiki = /\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g;
+	let match: RegExpExecArray | null;
+	while ((match = wiki.exec(text))) {
+		if (match[1]) tokens.push(match[1].trim());
+	}
+	const md = /\[([^\]]*)\]\(([^)\s]+)\)/g;
+	while ((match = md.exec(text))) {
+		const href = match[2] ?? '';
+		if (href && !/^https?:/i.test(href)) tokens.push(href);
+	}
+	if (tokens.length) return tokens;
+
 	return text
 		.split(/\r?\n/)
 		.map((line) => line.trim())
 		.filter((line) => line && !line.startsWith('#'));
 }
 
-function resolveDroppedPath(app: App, raw: string): TFile | null {
+function resolveDroppedPath(app: App, raw: string, sourcePath = ''): TFile | null {
 	let token = raw.trim();
 	if (!token) return null;
 	if (token.startsWith('obsidian://')) {
@@ -115,9 +161,10 @@ function resolveDroppedPath(app: App, raw: string): TFile | null {
 			/* keep token */
 		}
 	}
-	const cleaned = unwrapLink(decodeURIComponent(token));
-	const dest = app.metadataCache.getFirstLinkpathDest(cleaned, '');
-	if (dest instanceof TFile) return dest;
-	const direct = app.vault.getAbstractFileByPath(cleaned);
-	return direct instanceof TFile ? direct : null;
+	try {
+		token = decodeURIComponent(token);
+	} catch {
+		/* keep token */
+	}
+	return resolveVaultFile(app, unwrapLink(token), sourcePath);
 }

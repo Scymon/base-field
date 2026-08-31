@@ -18,7 +18,7 @@ import {
 	nearestGroundSizePreset,
 	nextGroundSize,
 } from './constants';
-import { parseBoardDrop } from './drops';
+import { acceptBoardDrag, parseBoardDrop } from './drops';
 import {
 	createDefaultField,
 	newId,
@@ -173,8 +173,8 @@ export class FieldFileView extends TextFileView implements HoverParent {
 			id: newId(),
 			kind: 'piece',
 			label,
-			x: x ?? slot.x,
-			y: y ?? slot.y,
+			x: x === undefined ? slot.x : roundCoord(x),
+			y: y === undefined ? slot.y : roundCoord(y),
 			model: model ?? null,
 		};
 		this.field.instances.push(instance);
@@ -202,8 +202,8 @@ export class FieldFileView extends TextFileView implements HoverParent {
 			id: newId(),
 			kind: 'note',
 			path: file.path,
-			x: x ?? slot.x,
-			y: y ?? slot.y,
+			x: x === undefined ? slot.x : roundCoord(x),
+			y: y === undefined ? slot.y : roundCoord(y),
 		});
 		this.syncRenderer();
 		this.persist();
@@ -280,8 +280,7 @@ export class FieldFileView extends TextFileView implements HoverParent {
 	}
 
 	private onDragOver = (event: DragEvent): void => {
-		event.preventDefault();
-		if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+		acceptBoardDrag(event);
 		this.hostEl?.addClass('is-drop-target');
 	};
 
@@ -293,11 +292,11 @@ export class FieldFileView extends TextFileView implements HoverParent {
 	};
 
 	private onDrop = (event: DragEvent): void => {
-		event.preventDefault();
+		acceptBoardDrag(event);
 		this.hostEl?.removeClass('is-drop-target');
 		const hit = this.renderer?.pickGround(event.clientX, event.clientY);
 		if (!hit) return;
-		const drops = parseBoardDrop(this.app, event);
+		const drops = parseBoardDrop(this.app, event, this.file?.path ?? '');
 		if (drops.length === 0) return;
 		drops.forEach((drop, index) => {
 			const x = hit.x + index * 1.6;
