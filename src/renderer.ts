@@ -58,12 +58,12 @@ const MIN_DISTANCE = 6;
 
 /** Matrix construct: open white void. Lines fade by alpha, not by mixing to grey. */
 const SKY_ZENITH = 0xf7f8fa;
-const GRID_MINOR = 0x3a4048;
-const GRID_MAJOR = 0x2a3038;
+const GRID_MINOR = 0x2e343c;
+const GRID_MAJOR = 0x1e242c;
 const GRID_CELL = 4;
 const GRID_MAJOR_EVERY = 5;
-const GRID_MINOR_ALPHA = 0.26;
-const GRID_MAJOR_ALPHA = 0.4;
+const GRID_MINOR_ALPHA = 0.22;
+const GRID_MAJOR_ALPHA = 0.36;
 /** Visual field is independent of Size (Size is pan/play-area only). */
 const GRID_PLANE = 4000;
 const DEFAULT_DISTANCE = 40;
@@ -164,10 +164,14 @@ export class FieldRenderer {
 		this.loop();
 	}
 
-	/** Raycast the infinite board plane from a client point (drops, pan, pawn drag). */
-	pickGround(clientX: number, clientY: number, clampToBoard = true): Vector3 | null {
+	/**
+	 * Raycast the infinite ground plane from a client point (explorer / pane drops).
+	 * Never clamps to Size — a drop is "put it here," under the cursor.
+	 */
+	pickGround(clientX: number, clientY: number): Vector3 | null {
+		this.applyCamera();
 		const fake = { clientX, clientY } as PointerEvent;
-		return this.intersectGround(fake, clampToBoard);
+		return this.intersectGround(fake, false);
 	}
 
 	setState(state: FieldSceneState): void {
@@ -398,9 +402,12 @@ export class FieldRenderer {
 	/** Keep the construct under the look target so pan never walks off a world-origin island. */
 	private syncGridToView(): void {
 		this.grid.position.set(this.target.x, 0.02, this.target.z);
+		const cam = this.activeCamera.position;
+		this.gridUniforms.uCamera.value.copy(cam);
+		const xz = Math.hypot(cam.x - this.target.x, cam.z - this.target.z);
 		const d = this.distance;
-		this.gridUniforms.uFadeNear.value = Math.max(56, d * 2.4);
-		this.gridUniforms.uFadeFar.value = Math.max(200, d * 7.5);
+		this.gridUniforms.uFadeNear.value = xz + d * 0.7;
+		this.gridUniforms.uFadeFar.value = xz + d * 5.0;
 	}
 
 	private setGroundSize(size: number): void {
@@ -613,6 +620,7 @@ export class FieldRenderer {
 
 	private intersectGround(event: PointerEvent, clampToBoard = true): Vector3 | null {
 		this.setPointer(event);
+		this.activeCamera.updateMatrixWorld();
 		this.raycaster.setFromCamera(this.pointer, this.activeCamera);
 		const point = new Vector3();
 		if (this.raycaster.ray.intersectPlane(GROUND_PLANE, point)) {
@@ -626,10 +634,13 @@ export class FieldRenderer {
 		return null;
 	}
 
+	/** NDC from the WebGL canvas, not the host (which can include overlays). */
 	private setPointer(event: PointerEvent): void {
 		const rect = this.canvas.getBoundingClientRect();
-		this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-		this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+		const w = Math.max(1, rect.width);
+		const h = Math.max(1, rect.height);
+		this.pointer.x = ((event.clientX - rect.left) / w) * 2 - 1;
+		this.pointer.y = -((event.clientY - rect.top) / h) * 2 + 1;
 	}
 }
 
@@ -642,6 +653,7 @@ interface ConstructGridUniforms {
 	uMajorAlpha: { value: number };
 	uFadeNear: { value: number };
 	uFadeFar: { value: number };
+	uCamera: { value: Vector3 };
 }
 
 /**
@@ -657,8 +669,9 @@ function createConstructGrid(): { mesh: Mesh; uniforms: ConstructGridUniforms } 
 		uMajorColor: { value: new Color(GRID_MAJOR) },
 		uMinorAlpha: { value: GRID_MINOR_ALPHA },
 		uMajorAlpha: { value: GRID_MAJOR_ALPHA },
-		uFadeNear: { value: 96 },
-		uFadeFar: { value: 300 },
+		uFadeNear: { value: 60 },
+		uFadeFar: { value: 230 },
+		uCamera: { value: new Vector3(0, 20, 30) },
 	};
 	const material = new ShaderMaterial({
 		name: 'FieldsConstructGrid',
@@ -685,6 +698,7 @@ function createConstructGrid(): { mesh: Mesh; uniforms: ConstructGridUniforms } 
 			uniform float uMajorAlpha;
 			uniform float uFadeNear;
 			uniform float uFadeFar;
+			uniform vec3 uCamera;
 
 			float lineMask(vec2 coord, float width) {
 				vec2 deriv = fwidth(coord);
@@ -695,19 +709,23 @@ function createConstructGrid(): { mesh: Mesh; uniforms: ConstructGridUniforms } 
 			void main() {
 				vec2 minorCoord = vWorldXZ / max(uCell, 0.001);
 				vec2 majorCoord = vWorldXZ / max(uCell * uMajorEvery, 0.001);
-				float minor = lineMask(minorCoord, 0.75);
-				float major = lineMask(majorCoord, 1.05);
+				float minor = lineMask(minorCoord, 0.7);
+				float major = lineMask(majorCoord, 1.0);
 
-				// Drop a level when cells collapse to a few pixels — that smear is the grey blob.
-				float minorPix = max(fwidth(minorCoord.x), fwidth(minorCoord.y));
-				float majorPix = max(fwidth(majorCoord.x), fwidth(majorCoord.y));
-				minor *= 1.0 - smoothstep(0.16, 0.5, minorPix);
-				major *= 1.0 - smoothstep(0.16, 0.5, majorPix);
-
-				float dist = length(vWorldXZ - cameraPosition.xz);
+				float dist = length(vWorldXZ - uCamera.xz);
 				float fade = 1.0 - smoothstep(uFadeNear, uFadeFar, dist);
-				float alpha = max(minor * uMinorAlpha, major * uMajorAlpha) * fade;
-				if (alpha < 0.012) discard;
+
+				// Same horizon for both weights. Minor cells collapse first in
+				// screen space; majors are 5× larger so their own fwidth stays
+				// dense and would remain inked after the small grid is gone.
+				float minorPix = max(fwidth(minorCoord.x), fwidth(minorCoord.y));
+				// Finish while minor cells are still a few pixels — majors are
+				// thicker/higher-alpha, so a later cutoff leaves a hard lattice.
+				float lod = 1.0 - smoothstep(0.09, 0.34, minorPix);
+				float horizon = fade * lod;
+
+				float alpha = max(minor * uMinorAlpha, major * uMajorAlpha) * horizon;
+				if (alpha < 0.01) discard;
 
 				vec3 color = mix(uMinorColor, uMajorColor, step(0.001, major));
 				gl_FragColor = vec4(color, alpha);

@@ -294,6 +294,7 @@ export class FieldFileView extends TextFileView implements HoverParent {
 	private onDrop = (event: DragEvent): void => {
 		acceptBoardDrag(event);
 		this.hostEl?.removeClass('is-drop-target');
+		// Unclamped raycast — Size is pan/play-area, not the drop box.
 		const hit = this.renderer?.pickGround(event.clientX, event.clientY);
 		if (!hit) return;
 		const drops = parseBoardDrop(this.app, event, this.file?.path ?? '');
