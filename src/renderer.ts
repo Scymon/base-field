@@ -704,15 +704,17 @@ function createConstructGrid(): { mesh: Mesh; uniforms: ConstructGridUniforms } 
 				float minor = lineMask(minorCoord, 0.7);
 				float major = lineMask(majorCoord, 1.0);
 
-				// Soften when cells collapse; do not hard-kill into a hole or a grey fill.
-				float minorPix = max(fwidth(minorCoord.x), fwidth(minorCoord.y));
-				float majorPix = max(fwidth(majorCoord.x), fwidth(majorCoord.y));
-				minor *= mix(1.0, 0.12, smoothstep(0.14, 0.62, minorPix));
-				major *= mix(1.0, 0.2, smoothstep(0.14, 0.62, majorPix));
-
 				float dist = length(vWorldXZ - uCamera.xz);
 				float fade = 1.0 - smoothstep(uFadeNear, uFadeFar, dist);
-				float alpha = max(minor * uMinorAlpha, major * uMajorAlpha) * fade;
+
+				// Same horizon for both weights. Minor cells collapse first in
+				// screen space; majors are 5× larger so their own fwidth stays
+				// dense and would remain inked after the small grid is gone.
+				float minorPix = max(fwidth(minorCoord.x), fwidth(minorCoord.y));
+				float lod = 1.0 - smoothstep(0.12, 0.52, minorPix);
+				float horizon = fade * lod;
+
+				float alpha = max(minor * uMinorAlpha, major * uMajorAlpha) * horizon;
 				if (alpha < 0.01) discard;
 
 				vec3 color = mix(uMinorColor, uMajorColor, step(0.001, major));
