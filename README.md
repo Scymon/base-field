@@ -51,7 +51,7 @@ Example:
 	"camera": {
 		"mode": "perspective",
 		"target": [0, 0],
-		"distance": 18,
+		"distance": 26,
 		"azimuth": 0.55,
 		"elevation": 0.95
 	},

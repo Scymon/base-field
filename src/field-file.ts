@@ -4,7 +4,7 @@ import type { FieldCameraState, FieldFileData, FieldInstance } from './types';
 export const DEFAULT_CAMERA: FieldCameraState = {
 	mode: 'perspective',
 	target: [0, 0],
-	distance: 18,
+	distance: 26,
 	azimuth: 0.55,
 	elevation: 0.95,
 };

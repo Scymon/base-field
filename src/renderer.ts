@@ -58,11 +58,11 @@ const MIN_ELEVATION = 0.4;
 const MAX_ELEVATION = 1.15;
 const MIN_DISTANCE = 6;
 
-const SKY_ZENITH = 0xf7f8fa;
-const SKY_HORIZON = 0xd6dae1;
-const FOG_COLOR = 0xdde1e6;
-const GROUND_COLOR = 0xe6e8ec;
-const GRID_COLOR = 0x7d838c;
+const SKY_ZENITH = 0xf4f6f9;
+const SKY_HORIZON = 0xc5cbd4;
+const FOG_COLOR = 0xd2d6dd;
+const GROUND_COLOR = 0xe4e2dc;
+const GRID_COLOR = 0x5a616b;
 
 export class FieldRenderer {
 	readonly canvas: HTMLCanvasElement;
@@ -79,6 +79,11 @@ export class FieldRenderer {
 	private readonly ground: Mesh;
 	private readonly grid: Mesh;
 	private readonly sky: Mesh;
+	private readonly gridUniforms: {
+		uColor: { value: Color };
+		uHalf: { value: number };
+		uCell: { value: number };
+	};
 	private readonly piecesRoot = new Group();
 	private readonly nodes = new Map<string, PieceNode>();
 	private readonly modelCache = new Map<string, Object3D>();
@@ -142,7 +147,9 @@ export class FieldRenderer {
 		this.ground.receiveShadow = false;
 		this.scene.add(this.ground);
 
-		this.grid = createFadingGrid(this.groundSize);
+		const grid = createFadingGrid(this.groundSize);
+		this.grid = grid.mesh;
+		this.gridUniforms = grid.uniforms;
 		this.scene.add(this.grid);
 
 		this.scene.add(new HemisphereLight(0xf4f6fa, 0xc5c2bb, 0.95));
@@ -389,8 +396,7 @@ export class FieldRenderer {
 		this.ground.geometry = new PlaneGeometry(size, size);
 		this.grid.geometry.dispose();
 		this.grid.geometry = new PlaneGeometry(size, size);
-		const gridMat = this.grid.material as ShaderMaterial;
-		gridMat.uniforms['uHalf']!.value = size * 0.5;
+		this.gridUniforms.uHalf.value = size * 0.5;
 		if (this.groundShader) this.groundShader.uniforms.uHalfSize.value = size * 0.5;
 		this.distance = clamp(this.distance, MIN_DISTANCE, this.maxDistance());
 		this.clampTarget();
@@ -642,7 +648,7 @@ function createSkyDome(): Mesh {
 			uniform vec3 uZenith;
 			uniform vec3 uHorizon;
 			void main() {
-				float t = smoothstep(-0.04, 0.7, vDir.y);
+				float t = smoothstep(-0.06, 0.78, vDir.y);
 				gl_FragColor = vec4(mix(uHorizon, uZenith, t), 1.0);
 			}
 		`,
@@ -653,27 +659,30 @@ function createSkyDome(): Mesh {
 	return mesh;
 }
 
-function createFadingGrid(size: number): Mesh {
+function createFadingGrid(size: number): {
+	mesh: Mesh;
+	uniforms: {
+		uColor: { value: Color };
+		uHalf: { value: number };
+		uCell: { value: number };
+	};
+} {
+	const uniforms = {
+		uColor: { value: new Color(GRID_COLOR) },
+		uHalf: { value: size * 0.5 },
+		uCell: { value: 2 },
+	};
 	const material = new ShaderMaterial({
 		name: 'FieldsGrid',
 		transparent: true,
 		depthWrite: false,
-		fog: true,
-		uniforms: {
-			uColor: { value: new Color(GRID_COLOR) },
-			uHalf: { value: size * 0.5 },
-			uCell: { value: 2 },
-		},
+		fog: false,
+		uniforms,
 		vertexShader: `
 			varying vec2 vWorldXZ;
-			#include <common>
-			#include <fog_pars_vertex>
 			void main() {
-				vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-				vWorldXZ = worldPosition.xz;
-				vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-				gl_Position = projectionMatrix * mvPosition;
-				#include <fog_vertex>
+				vWorldXZ = (modelMatrix * vec4(position, 1.0)).xz;
+				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 			}
 		`,
 		fragmentShader: `
@@ -681,33 +690,30 @@ function createFadingGrid(size: number): Mesh {
 			uniform vec3 uColor;
 			uniform float uHalf;
 			uniform float uCell;
-			#include <common>
-			#include <fog_pars_fragment>
 			void main() {
 				vec2 coord = vWorldXZ / uCell;
 				vec2 deriv = fwidth(coord);
 				vec2 line = abs(fract(coord - 0.5) - 0.5) / max(deriv, vec2(1e-6));
-				float minor = 1.0 - min(min(line.x, line.y), 1.0);
+				float minor = 1.0 - smoothstep(0.0, 1.35, min(line.x, line.y));
 
 				vec2 majorCoord = vWorldXZ / (uCell * 5.0);
 				vec2 majorDeriv = fwidth(majorCoord);
 				vec2 majorLine = abs(fract(majorCoord - 0.5) - 0.5) / max(majorDeriv, vec2(1e-6));
-				float major = 1.0 - min(min(majorLine.x, majorLine.y), 1.0);
+				float major = 1.0 - smoothstep(0.0, 1.5, min(majorLine.x, majorLine.y));
 
 				float dist = length(vWorldXZ) / max(uHalf, 0.001);
-				float fade = 1.0 - smoothstep(0.42, 0.92, dist);
-				float alpha = max(minor * 0.26, major * 0.4) * fade;
-				if (alpha < 0.01) discard;
+				float fade = 1.0 - smoothstep(0.32, 0.86, dist);
+				float alpha = max(minor * 0.5, major * 0.72) * fade;
+				if (alpha < 0.015) discard;
 				gl_FragColor = vec4(uColor, alpha);
-				#include <fog_fragment>
 			}
 		`,
 	});
 	const mesh = new Mesh(new PlaneGeometry(size, size), material);
 	mesh.rotation.x = -Math.PI / 2;
-	mesh.position.y = 0.015;
+	mesh.position.y = 0.02;
 	mesh.renderOrder = 1;
-	return mesh;
+	return { mesh, uniforms };
 }
 
 function patchGroundFade(
